@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  postgres-cluster:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "${HOST_POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"
+      - "${HOST_PATRONI_API_PORT:-8008}:${PATRONI_API_PORT:-8008}"
+      - "${HOST_ETCD_CLIENT_PORT:-2379}:${ETCD_CLIENT_PORT:-2379}"
+      - "${HOST_ETCD_PEER_PORT:-2380}:${ETCD_PEER_PORT:-2380}"
+    hostname: "${APP_NAME:-postgres-cluster}"
+    network_mode: "host"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+    environment:
+      - PGDATA=/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
