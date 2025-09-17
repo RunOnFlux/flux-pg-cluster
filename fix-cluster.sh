@@ -7,8 +7,9 @@ echo "This script will fix the PostgreSQL system ID mismatch issue"
 echo "Time: $(date)"
 echo ""
 
-echo "1. STOPPING PATRONI..."
+echo "1. STOPPING ALL SERVICES..."
 supervisorctl stop patroni
+supervisorctl stop etcd
 sleep 3
 
 echo "2. CHECKING CURRENT POSTGRESQL DATA..."
@@ -22,28 +23,48 @@ echo ""
 
 echo "3. BACKING UP CURRENT DATA..."
 if [ -d "/var/lib/postgresql/data" ] && [ "$(ls -A /var/lib/postgresql/data)" ]; then
-    echo "Creating backup of existing data..."
+    echo "Creating backup of existing PostgreSQL data..."
     mv /var/lib/postgresql/data /var/lib/postgresql/data.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || echo "Backup failed, but continuing..."
 else
-    echo "No data to backup"
+    echo "No PostgreSQL data to backup"
 fi
 
-echo "4. REMOVING OLD POSTGRESQL DATA COMPLETELY..."
+if [ -d "/var/lib/etcd" ] && [ "$(ls -A /var/lib/etcd)" ]; then
+    echo "Creating backup of existing etcd data..."
+    mv /var/lib/etcd /var/lib/etcd.backup.$(date +%Y%m%d_%H%M%S) 2>/dev/null || echo "etcd backup failed, but continuing..."
+else
+    echo "No etcd data to backup"
+fi
+
+echo "4. REMOVING OLD DATA COMPLETELY..."
+echo "Clearing PostgreSQL data..."
 rm -rf /var/lib/postgresql/data/*
 rm -rf /var/lib/postgresql/data/.* 2>/dev/null || true
 
-echo "5. RECREATING CLEAN DATA DIRECTORY..."
+echo "Clearing etcd data..."
+rm -rf /var/lib/etcd/*
+rm -rf /var/lib/etcd/.* 2>/dev/null || true
+
+echo "5. RECREATING CLEAN DATA DIRECTORIES..."
 mkdir -p /var/lib/postgresql/data
 chown postgres:postgres /var/lib/postgresql/data
 chmod 700 /var/lib/postgresql/data
+
+mkdir -p /var/lib/etcd
+chown root:root /var/lib/etcd
+chmod 700 /var/lib/etcd
 
 echo "6. VERIFYING CLEAN STATE..."
 echo "Data directory is now:"
 ls -la /var/lib/postgresql/data/ || echo "Directory empty (good!)"
 echo ""
 
-echo "7. RESTARTING PATRONI..."
-echo "Patroni will now initialize a fresh PostgreSQL instance..."
+echo "7. RESTARTING SERVICES..."
+echo "Starting etcd with fresh data..."
+supervisorctl start etcd
+sleep 5
+
+echo "Starting Patroni - it will initialize a fresh PostgreSQL instance..."
 supervisorctl start patroni
 
 echo ""
