@@ -1,25 +1,106 @@
 version: '3.8'
 
+networks:
+  cluster_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
 services:
-  postgres-cluster:
+  # Mock Flux API Server
+  mock-api:
+    image: nginx:alpine
+    container_name: mock-flux-api
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./mock-api:/usr/share/nginx/html:ro
+    networks:
+      cluster_network:
+        ipv4_address: 172.20.0.5
+    restart: unless-stopped
+
+  # PostgreSQL Cluster Node 1
+  postgres-node1:
     build:
       context: .
       dockerfile: Dockerfile
     env_file:
       - .env
     ports:
-      - "${HOST_POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"
-      - "${HOST_PATRONI_API_PORT:-8008}:${PATRONI_API_PORT:-8008}"
-      - "${HOST_ETCD_CLIENT_PORT:-2379}:${ETCD_CLIENT_PORT:-2379}"
-      - "${HOST_ETCD_PEER_PORT:-2380}:${ETCD_PEER_PORT:-2380}"
-    hostname: "${APP_NAME:-postgres-cluster}"
-    network_mode: "host"
+      - "5432:5432"
+      - "8008:8008"
+      - "2379:2379"
+      - "2380:2380"
+    hostname: postgres-cluster-node1
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data1:/var/lib/postgresql/data
       - /etc/localtime:/etc/localtime:ro
+    networks:
+      cluster_network:
+        ipv4_address: 172.20.0.10
     restart: unless-stopped
     environment:
       - PGDATA=/var/lib/postgresql/data
+      - FLUX_API_URL=http://172.20.0.5:80
+    depends_on:
+      - mock-api
+
+  # PostgreSQL Cluster Node 2
+  postgres-node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "5433:5432"
+      - "8009:8008"
+      - "2381:2379"
+      - "2382:2380"
+    hostname: postgres-cluster-node2
+    volumes:
+      - postgres_data2:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      cluster_network:
+        ipv4_address: 172.20.0.11
+    restart: unless-stopped
+    environment:
+      - PGDATA=/var/lib/postgresql/data
+      - FLUX_API_URL=http://172.20.0.5:80
+    depends_on:
+      - mock-api
+
+  # PostgreSQL Cluster Node 3
+  postgres-node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "5434:5432"
+      - "8010:8008"
+      - "2383:2379"
+      - "2384:2380"
+    hostname: postgres-cluster-node3
+    volumes:
+      - postgres_data3:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      cluster_network:
+        ipv4_address: 172.20.0.12
+    restart: unless-stopped
+    environment:
+      - PGDATA=/var/lib/postgresql/data
+      - FLUX_API_URL=http://172.20.0.5:80
+    depends_on:
+      - mock-api
 
 volumes:
-  postgres_data:
+  postgres_data1:
+  postgres_data2:
+  postgres_data3:

@@ -1,0 +1,35 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "ip": "172.20.0.10",
+      "name": "postgres-cluster-node1",
+      "ports": [
+        { "privatePort": 5432, "publicPort": 5432 },
+        { "privatePort": 8008, "publicPort": 8008 },
+        { "privatePort": 2379, "publicPort": 2379 },
+        { "privatePort": 2380, "publicPort": 2380 }
+      ]
+    },
+    {
+      "ip": "172.20.0.11",
+      "name": "postgres-cluster-node2",
+      "ports": [
+        { "privatePort": 5432, "publicPort": 5433 },
+        { "privatePort": 8008, "publicPort": 8009 },
+        { "privatePort": 2379, "publicPort": 2381 },
+        { "privatePort": 2380, "publicPort": 2382 }
+      ]
+    },
+    {
+      "ip": "172.20.0.12",
+      "name": "postgres-cluster-node3",
+      "ports": [
+        { "privatePort": 5432, "publicPort": 5434 },
+        { "privatePort": 8008, "publicPort": 8010 },
+        { "privatePort": 2379, "publicPort": 2383 },
+        { "privatePort": 2380, "publicPort": 2384 }
+      ]
+    }
+  ]
+}

@@ -23,6 +23,8 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 
 ## Quick Start
 
+### Production Deployment
+
 1. **Clone and configure**:
    ```bash
    git clone <repository>
@@ -49,6 +51,42 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
    docker-compose up -d --build
    ```
 
+### Local Testing
+
+For local development and testing, this repository includes a complete mock environment:
+
+1. **Start local test cluster**:
+   ```bash
+   docker-compose up -d --build
+   ```
+
+2. **Run test suite**:
+   ```bash
+   bash test-local.sh
+   ```
+
+3. **Access local services**:
+   - **Mock Flux API**: http://localhost:8080
+   - **PostgreSQL nodes**:
+     - Node 1: `localhost:5432`
+     - Node 2: `localhost:5433`
+     - Node 3: `localhost:5434`
+   - **Patroni APIs**: localhost:8008, 8009, 8010
+   - **etcd endpoints**: localhost:2379, 2381, 2383
+
+4. **Connect to PostgreSQL**:
+   ```bash
+   # Default credentials from .env
+   psql -h localhost -p 5432 -U postgres
+   # Password: supersecretpassword
+   ```
+
+The local setup includes:
+- **3-node PostgreSQL cluster** with automatic failover
+- **Mock Flux API server** (nginx serving JSON files)
+- **Isolated Docker network** simulating real deployment
+- **All services** running on separate ports for testing
+
 ## Configuration
 
 ### Environment Variables
@@ -56,12 +94,18 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `APP_NAME` | Flux application name for API discovery | `myapp-postgres` |
-| `POSTGRES_PORT` | PostgreSQL port | `5432` |
-| `PATRONI_API_PORT` | Patroni REST API port | `8008` |
-| `ETCD_CLIENT_PORT` | etcd client port | `2379` |
-| `ETCD_PEER_PORT` | etcd peer communication port | `2380` |
+| `HOST_POSTGRES_PORT` | Host PostgreSQL port mapping | `5432` |
+| `HOST_PATRONI_API_PORT` | Host Patroni REST API port mapping | `8008` |
+| `HOST_ETCD_CLIENT_PORT` | Host etcd client port mapping | `2379` |
+| `HOST_ETCD_PEER_PORT` | Host etcd peer communication port mapping | `2380` |
+| `POSTGRES_PORT` | Internal PostgreSQL port | `5432` |
+| `PATRONI_API_PORT` | Internal Patroni REST API port | `8008` |
+| `ETCD_CLIENT_PORT` | Internal etcd client port | `2379` |
+| `ETCD_PEER_PORT` | Internal etcd peer communication port | `2380` |
 | `POSTGRES_SUPERUSER_PASSWORD` | PostgreSQL superuser password | Required |
 | `POSTGRES_REPLICATION_PASSWORD` | PostgreSQL replication user password | Required |
+| `POSTGRES_USER` | PostgreSQL username | `postgres` |
+| `POSTGRES_DB` | Default PostgreSQL database | `postgres` |
 
 ## How It Works
 

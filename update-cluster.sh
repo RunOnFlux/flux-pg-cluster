@@ -40,10 +40,12 @@ while true; do
     echo "================================================================================"
 
     echo "Fetching desired cluster state from Flux API..."
-    echo "API URL: https://api.runonflux.io/apps/location/${APP_NAME}"
+    # Use local mock API if FLUX_API_URL is set, otherwise use real Flux API
+    FLUX_API_BASE="${FLUX_API_URL:-https://api.runonflux.io}"
+    echo "API URL: ${FLUX_API_BASE}/apps/location/${APP_NAME}"
 
     # Get current desired state from Flux API
-    API_RESPONSE=$(curl -s "https://api.runonflux.io/apps/location/${APP_NAME}" 2>&1 || echo '{"data":[]}')
+    API_RESPONSE=$(curl -s "${FLUX_API_BASE}/apps/location/${APP_NAME}" 2>&1 || echo '{"data":[]}')
 
     echo "API Response:"
     echo "$API_RESPONSE" | jq '.' 2>/dev/null || echo "$API_RESPONSE"

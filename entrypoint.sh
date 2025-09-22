@@ -59,9 +59,29 @@ echo "==========================================================================
 
 # Get the host IP address
 echo "Attempting to discover host IP address..."
-echo "Method 1: curl ifconfig.me"
-MY_IP=$(curl -s http://ifconfig.me 2>&1) || echo "Failed"
-echo "Result: $MY_IP"
+
+# For local testing with Docker, prefer container IP over external IP
+if [ -n "$FLUX_API_URL" ] && echo "$FLUX_API_URL" | grep -q "172.20.0.5"; then
+    echo "Local testing mode detected - using container IP"
+    echo "Method 1: Container hostname to IP mapping"
+
+    # Map hostname to known container IPs for local testing
+    case "$(hostname)" in
+        "postgres-cluster-node1") MY_IP="172.20.0.10" ;;
+        "postgres-cluster-node2") MY_IP="172.20.0.11" ;;
+        "postgres-cluster-node3") MY_IP="172.20.0.12" ;;
+        *)
+            echo "Unknown hostname $(hostname), trying network interface detection"
+            MY_IP=$(hostname -i 2>&1 | awk '{print $1}') || echo "Failed"
+            ;;
+    esac
+    echo "Result: $MY_IP"
+else
+    echo "Production mode - using external IP"
+    echo "Method 1: curl ifconfig.me"
+    MY_IP=$(curl -s http://ifconfig.me 2>&1) || echo "Failed"
+    echo "Result: $MY_IP"
+fi
 
 if [ -z "$MY_IP" ] || [ "$MY_IP" = "Failed" ]; then
     echo "Method 2: curl ipinfo.io/ip"
@@ -82,10 +102,12 @@ echo "FLUX API DISCOVERY"
 echo "================================================================================"
 
 # Call Flux API to get cluster member IPs
+# Use local mock API if FLUX_API_URL is set, otherwise use real Flux API
+FLUX_API_BASE="${FLUX_API_URL:-https://api.runonflux.io}"
 echo "Fetching cluster members from Flux API for app: $APP_NAME"
-echo "API URL: https://api.runonflux.io/apps/location/${APP_NAME}"
+echo "API URL: ${FLUX_API_BASE}/apps/location/${APP_NAME}"
 
-API_RESPONSE=$(curl -s "https://api.runonflux.io/apps/location/${APP_NAME}" 2>&1 || echo '{"data":[]}')
+API_RESPONSE=$(curl -s "${FLUX_API_BASE}/apps/location/${APP_NAME}" 2>&1 || echo '{"data":[]}')
 echo "API Response:"
 echo "$API_RESPONSE" | jq '.' 2>/dev/null || echo "$API_RESPONSE"
 
