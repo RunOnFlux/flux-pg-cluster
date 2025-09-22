@@ -144,6 +144,17 @@ done
 # Generate node name for this instance
 MY_NAME="node-$(echo $MY_IP | tr '.' '-')"
 
+# Check if this node is in the initial cluster, if not add it
+if ! echo "$ETCD_INITIAL_CLUSTER" | grep -q "$MY_NAME="; then
+    echo "WARNING: Current node $MY_NAME not found in initial cluster, adding it..."
+    if [ -n "$ETCD_INITIAL_CLUSTER" ]; then
+        ETCD_INITIAL_CLUSTER="${ETCD_INITIAL_CLUSTER},"
+        ETCD_HOSTS="${ETCD_HOSTS},"
+    fi
+    ETCD_INITIAL_CLUSTER="${ETCD_INITIAL_CLUSTER}${MY_NAME}=http://${MY_IP}:${HOST_ETCD_PEER_PORT}"
+    ETCD_HOSTS="${ETCD_HOSTS}${MY_IP}:${HOST_ETCD_CLIENT_PORT}"
+fi
+
 echo "================================================================================"
 echo "FINAL CLUSTER CONFIGURATION"
 echo "================================================================================"

@@ -165,6 +165,26 @@ while true; do
         # Note: We don't add new members here, as they will add themselves when they start up
         # This is the expected behavior for etcd clusters
 
+        # Update the ETCD_INITIAL_CLUSTER in cluster_env to reflect current desired state
+        echo "Updating ETCD_INITIAL_CLUSTER configuration..."
+        NEW_ETCD_INITIAL_CLUSTER=""
+        NEW_ETCD_HOSTS=""
+
+        for IP in $DESIRED_IPS; do
+            NODE_NAME="node-$(echo $IP | tr '.' '-')"
+            if [ -n "$NEW_ETCD_INITIAL_CLUSTER" ]; then
+                NEW_ETCD_INITIAL_CLUSTER="${NEW_ETCD_INITIAL_CLUSTER},"
+                NEW_ETCD_HOSTS="${NEW_ETCD_HOSTS},"
+            fi
+            NEW_ETCD_INITIAL_CLUSTER="${NEW_ETCD_INITIAL_CLUSTER}${NODE_NAME}=http://${IP}:${HOST_ETCD_PEER_PORT}"
+            NEW_ETCD_HOSTS="${NEW_ETCD_HOSTS}${IP}:${HOST_ETCD_CLIENT_PORT}"
+        done
+
+        # Update cluster_env file with new configuration
+        sed -i "s|^ETCD_INITIAL_CLUSTER=.*|ETCD_INITIAL_CLUSTER=$NEW_ETCD_INITIAL_CLUSTER|" /etc/cluster_env
+        sed -i "s|^ETCD_HOSTS=.*|ETCD_HOSTS=$NEW_ETCD_HOSTS|" /etc/cluster_env
+        echo "Updated ETCD_INITIAL_CLUSTER to: $NEW_ETCD_INITIAL_CLUSTER"
+
     else
         echo "$(date): No current etcd members found or connection failed"
     fi
