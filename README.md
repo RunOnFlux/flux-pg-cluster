@@ -60,12 +60,7 @@ For local development and testing, this repository includes a complete mock envi
    docker-compose up -d --build
    ```
 
-2. **Run test suite**:
-   ```bash
-   bash test-local.sh
-   ```
-
-3. **Access local services**:
+2. **Access local services**:
    - **Mock Flux API**: http://localhost:8080
    - **PostgreSQL nodes**:
      - Node 1: `localhost:5432`
@@ -74,7 +69,7 @@ For local development and testing, this repository includes a complete mock envi
    - **Patroni APIs**: localhost:8008, 8009, 8010
    - **etcd endpoints**: localhost:2379, 2381, 2383
 
-4. **Connect to PostgreSQL**:
+3. **Connect to PostgreSQL**:
    ```bash
    # Default credentials from .env
    psql -h localhost -p 5432 -U postgres
