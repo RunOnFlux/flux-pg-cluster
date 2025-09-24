@@ -1,6 +1,6 @@
 # Dynamic PostgreSQL Cluster with Patroni and Flux Integration
 
-![Version](https://img.shields.io/badge/version-1.0.6-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.7-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
 ![Docker](https://img.shields.io/badge/Docker-required-blue.svg)
@@ -32,35 +32,16 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
    cp .env.example .env
    ```
 
-2. **Edit the .env file** with your configuration:
-   ```bash
-   # Set your Flux app name
-   APP_NAME=your-postgres-app-name
-
-   # Configure ports (defaults shown)
-   POSTGRES_PORT=5432
-   PATRONI_API_PORT=8008
-
-   # Set strong passwords
-   POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password
-   POSTGRES_REPLICATION_PASSWORD=your-replication-password
-   ```
-
-3. **Launch the cluster**:
-   ```bash
-   docker-compose up -d --build
-   ```
-
 ### Local Testing
 
 For local development and testing, this repository includes a complete mock environment:
 
-1. **Start local test cluster**:
+2. **Start local test cluster**:
    ```bash
    docker-compose up -d --build
    ```
 
-2. **Access local services**:
+3. **Access local services**:
    - **Mock Flux API**: http://localhost:8080
    - **PostgreSQL nodes**:
      - Node 1: `localhost:5432`
@@ -69,7 +50,7 @@ For local development and testing, this repository includes a complete mock envi
    - **Patroni APIs**: localhost:8008, 8009, 8010
    - **etcd endpoints**: localhost:2379, 2381, 2383
 
-3. **Connect to PostgreSQL**:
+4. **Connect to PostgreSQL**:
    ```bash
    # Default credentials from .env
    psql -h localhost -p 5432 -U postgres
@@ -101,6 +82,9 @@ The local setup includes:
 | `POSTGRES_REPLICATION_PASSWORD` | PostgreSQL replication user password | Required |
 | `POSTGRES_USER` | PostgreSQL username | `postgres` |
 | `POSTGRES_DB` | Default PostgreSQL database | `postgres` |
+| `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
+| `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
+| `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
 
 ## How It Works
 
@@ -124,30 +108,47 @@ The supervisord configuration manages three main processes:
 - **patroni**: PostgreSQL high availability manager
 - **updater**: Background script that maintains cluster membership
 
-## Monitoring and Management
-
-### Check Cluster Status
-
-```bash
-# View Patroni cluster status
-docker exec -it <container_name> patronictl -c /etc/patroni/patroni.yml list
-
-# Check etcd cluster members
-docker exec -it <container_name> etcdctl --endpoints=http://localhost:2379 member list
-
-# View service logs
-docker-compose logs -f postgres-cluster
-```
-
 ### Access PostgreSQL
 
-```bash
-# Connect to PostgreSQL
-psql -h localhost -p 5432 -U postgres
+#### Connection Strings
 
-# Or from within the container
-docker exec -it <container_name> psql -U postgres
+**For connections from within Docker containers (inside the cluster network):**
 ```
+Host: flux{COMPONENT_NAME}_{APPNAME}
+Port: 5432
+Database: postgres
+Username: postgres
+Password: [POSTGRES_SUPERUSER_PASSWORD]
+
+Example connection string:
+postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_{APPNAME}:5432/postgres
+
+# With SSL enabled:
+postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_{APPNAME}:5432/postgres?sslmode=require
+```
+
+**For external connections (from host machine or remote clients):**
+```
+Host: localhost (or server IP)
+Port: [HOST_POSTGRES_PORT] (default: 5432)
+Database: postgres
+Username: postgres
+Password: [POSTGRES_SUPERUSER_PASSWORD]
+
+Example connection string:
+postgresql://postgres:[PASSWORD]@localhost:5432/postgres
+
+# With SSL enabled:
+postgresql://postgres:[PASSWORD]@localhost:5432/postgres?sslmode=require
+```
+
+**For local testing with multiple nodes:**
+- Node 1: `postgresql://postgres:[PASSWORD]@localhost:5432/postgres`
+- Node 2: `postgresql://postgres:[PASSWORD]@localhost:5433/postgres`
+- Node 3: `postgresql://postgres:[PASSWORD]@localhost:5434/postgres`
+
+**With SSL enabled, add `?sslmode=require` to any connection string above.**
+
 
 ### Patroni REST API
 
@@ -165,42 +166,11 @@ Access the Patroni REST API at `http://localhost:8008` to:
 - **update-cluster.sh**: Background daemon for maintaining cluster membership
 - **supervisord.conf**: Process management configuration
 
-## Scaling
-
-To scale the cluster:
-
-1. Deploy additional instances with the same `APP_NAME`
-2. The new nodes will automatically discover existing cluster members
-3. Existing members will detect the new nodes within 60 seconds
-
-To remove nodes:
-
-1. Stop the container/instance
-2. Remaining cluster members will detect the removal and clean up within 60 seconds
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Cluster fails to start**: Check if the Flux API is accessible and returns valid data
-2. **Split-brain scenarios**: Ensure network connectivity between all cluster members
-3. **Permission issues**: Verify Docker has proper permissions to create volumes
-
 ### Logs
 
 Check logs for each component:
 ```bash
-# All services
-docker-compose logs
-
-# Specific service logs
 /var/log/supervisor/patroni.out.log
 /var/log/supervisor/etcd.out.log
 /var/log/supervisor/updater.out.log
 ```
-
-## Security Considerations
-
-- Use strong passwords for database authentication
-- Consider network isolation and firewall rules
-- Regularly update the base image for security patches
