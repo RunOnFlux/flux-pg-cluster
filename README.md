@@ -23,45 +23,32 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 
 ## Quick Start
 
-### Production Deployment
+### Production Deployment on Flux Network
 
-1. **Clone and configure**:
+1. **Deploy on Flux**:
+   - Create your PostgreSQL cluster application on Flux Network
+   - Set environment variables in your Flux app configuration:
+     ```
+     APP_NAME=your-postgres-app-name
+     POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password
+     POSTGRES_REPLICATION_PASSWORD=your-replication-password
+     SSL_ENABLED=true
+     SSL_PASSPHRASE=your-ssl-passphrase
+     ```
+
+2. **Connect from other Flux applications**:
    ```bash
-   git clone <repository>
-   cd flux-pg-cluster
-   cp .env.example .env
+   # Use this connection string in your applications:
+   postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_your-postgres-app-name:5432/postgres
+
+   # With SSL (recommended):
+   postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_your-postgres-app-name:5432/postgres?sslmode=require
    ```
 
-### Local Testing
+3. **Monitor your cluster**:
+   - Access Patroni REST API: `https://your-app-name.app_{patroni_rest_api_port}.runonflux.io`
+   - Check cluster status and perform failovers through the API
 
-For local development and testing, this repository includes a complete mock environment:
-
-2. **Start local test cluster**:
-   ```bash
-   docker-compose up -d --build
-   ```
-
-3. **Access local services**:
-   - **Mock Flux API**: http://localhost:8080
-   - **PostgreSQL nodes**:
-     - Node 1: `localhost:5432`
-     - Node 2: `localhost:5433`
-     - Node 3: `localhost:5434`
-   - **Patroni APIs**: localhost:8008, 8009, 8010
-   - **etcd endpoints**: localhost:2379, 2381, 2383
-
-4. **Connect to PostgreSQL**:
-   ```bash
-   # Default credentials from .env
-   psql -h localhost -p 5432 -U postgres
-   # Password: supersecretpassword
-   ```
-
-The local setup includes:
-- **3-node PostgreSQL cluster** with automatic failover
-- **Mock Flux API server** (nginx serving JSON files)
-- **Isolated Docker network** simulating real deployment
-- **All services** running on separate ports for testing
 
 ## Configuration
 
@@ -165,6 +152,45 @@ Access the Patroni REST API at `http://localhost:8008` to:
 - **patroni.yml.tpl**: Template for Patroni configuration
 - **update-cluster.sh**: Background daemon for maintaining cluster membership
 - **supervisord.conf**: Process management configuration
+
+**Clone and configure**:
+   ```bash
+   git clone <repository>
+   cd flux-pg-cluster
+   cp .env.example .env
+   ```
+
+### Local Testing
+
+For local development and testing, this repository includes a complete mock environment:
+
+1. **Start local test cluster**:
+   ```bash
+   docker-compose up -d --build
+   ```
+
+2. **Access local services**:
+   - **Mock Flux API**: http://localhost:8080
+   - **PostgreSQL nodes**:
+     - Node 1: `localhost:5432`
+     - Node 2: `localhost:5433`
+     - Node 3: `localhost:5434`
+   - **Patroni APIs**: localhost:8008, 8009, 8010
+   - **etcd endpoints**: localhost:2379, 2381, 2383
+
+3. **Connect to PostgreSQL**:
+   ```bash
+   # Default credentials from .env
+   psql -h localhost -p 5432 -U postgres
+   # Password: supersecretpassword
+   ```
+
+The local setup includes:
+- **3-node PostgreSQL cluster** with automatic failover
+- **Mock Flux API server** (nginx serving JSON files)
+- **Isolated Docker network** simulating real deployment
+- **All services** running on separate ports for testing
+
 
 ### Logs
 
