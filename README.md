@@ -1,5 +1,5 @@
 # Flux PostgreSQL Cluster
-
+did
 ![Version](https://img.shields.io/badge/version-1.0.7-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
@@ -152,13 +152,6 @@ Access the Patroni REST API at `http://localhost:8008` to:
 - **patroni.yml.tpl**: Template for Patroni configuration
 - **update-cluster.sh**: Background daemon for maintaining cluster membership
 - **supervisord.conf**: Process management configuration
-
-**Clone and configure**:
-   ```bash
-   git clone <repository>
-   cd flux-pg-cluster
-   cp .env.example .env
-   ```
 
 ### Local Testing
 
