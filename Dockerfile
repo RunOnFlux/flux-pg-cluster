@@ -19,13 +19,17 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     net-tools \
     procps \
+    openssl \
+    xxd \
+    vim-common \
+    gnutls-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
-RUN pip3 install patroni[etcd] psycopg2-binary
+RUN pip3 install patroni[etcd] psycopg2-binary cryptography
 
 # Create necessary directories
-RUN mkdir -p /etc/patroni /app /var/log/supervisor /var/lib/postgresql/data
+RUN mkdir -p /etc/patroni /app /var/log/supervisor /var/lib/postgresql/data /etc/ssl/cluster/{ca,etcd,postgres,patroni}
 
 # Create postgres user and set permissions
 RUN chown -R postgres:postgres /var/lib/postgresql
@@ -38,10 +42,11 @@ COPY update-cluster.sh /app/update-cluster.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY diagnose.sh /app/diagnose.sh
 COPY fix-cluster.sh /app/fix-cluster.sh
+COPY generate-certs.sh /app/generate-certs.sh
 COPY VERSION /app/VERSION
 
 # Make scripts executable
-RUN chmod +x /app/entrypoint.sh /app/update-cluster.sh /app/diagnose.sh /app/fix-cluster.sh
+RUN chmod +x /app/entrypoint.sh /app/update-cluster.sh /app/diagnose.sh /app/fix-cluster.sh /app/generate-certs.sh
 
 # Set working directory
 WORKDIR /app

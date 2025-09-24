@@ -29,6 +29,10 @@ APP_NAME=${APP_NAME:-postgres-cluster}
 POSTGRES_SUPERUSER_PASSWORD=${POSTGRES_SUPERUSER_PASSWORD:-postgres}
 POSTGRES_REPLICATION_PASSWORD=${POSTGRES_REPLICATION_PASSWORD:-replication}
 
+# SSL configuration defaults
+SSL_ENABLED=${SSL_ENABLED:-false}
+SSL_CERT_VALIDITY_DAYS=${SSL_CERT_VALIDITY_DAYS:-3650}
+
 # Port configuration
 HOST_POSTGRES_PORT=${HOST_POSTGRES_PORT:-5432}
 HOST_PATRONI_API_PORT=${HOST_PATRONI_API_PORT:-8008}
@@ -52,6 +56,11 @@ echo "  ETCD_CLIENT_PORT: $ETCD_CLIENT_PORT"
 echo "  ETCD_PEER_PORT: $ETCD_PEER_PORT"
 echo "  POSTGRES_SUPERUSER_PASSWORD: [REDACTED]"
 echo "  POSTGRES_REPLICATION_PASSWORD: [REDACTED]"
+echo "  SSL_ENABLED: $SSL_ENABLED"
+echo "  SSL_CERT_VALIDITY_DAYS: $SSL_CERT_VALIDITY_DAYS"
+if [ "$SSL_ENABLED" = "true" ]; then
+    echo "  SSL_PASSPHRASE: [REDACTED]"
+fi
 
 echo "================================================================================"
 echo "IP DISCOVERY"
@@ -140,6 +149,15 @@ ETCD_INITIAL_CLUSTER=""
 
 echo "Processing ${#IPS_ARRAY[@]} cluster members..."
 
+# Determine protocol based on SSL setting
+if [ "$SSL_ENABLED" = "true" ]; then
+    ETCD_PROTOCOL="https"
+    echo "SSL is enabled - using HTTPS for etcd cluster communication"
+else
+    ETCD_PROTOCOL="http"
+    echo "SSL is disabled - using HTTP for etcd cluster communication"
+fi
+
 # Build etcd configuration strings
 for i in "${!IPS_ARRAY[@]}"; do
     IP="${IPS_ARRAY[$i]}"
@@ -152,9 +170,9 @@ for i in "${!IPS_ARRAY[@]}"; do
         ETCD_INITIAL_CLUSTER="${ETCD_INITIAL_CLUSTER},"
     fi
 
-    # Use mapped ports for cluster communication
+    # Use mapped ports for cluster communication with appropriate protocol
     MEMBER_CLIENT_URL="${IP}:${HOST_ETCD_CLIENT_PORT}"
-    MEMBER_PEER_URL="http://${IP}:${HOST_ETCD_PEER_PORT}"
+    MEMBER_PEER_URL="${ETCD_PROTOCOL}://${IP}:${HOST_ETCD_PEER_PORT}"
 
     echo "  Client URL: $MEMBER_CLIENT_URL"
     echo "  Peer URL: $MEMBER_PEER_URL"
@@ -173,7 +191,7 @@ if ! echo "$ETCD_INITIAL_CLUSTER" | grep -q "$MY_NAME="; then
         ETCD_INITIAL_CLUSTER="${ETCD_INITIAL_CLUSTER},"
         ETCD_HOSTS="${ETCD_HOSTS},"
     fi
-    ETCD_INITIAL_CLUSTER="${ETCD_INITIAL_CLUSTER}${MY_NAME}=http://${MY_IP}:${HOST_ETCD_PEER_PORT}"
+    ETCD_INITIAL_CLUSTER="${ETCD_INITIAL_CLUSTER}${MY_NAME}=${ETCD_PROTOCOL}://${MY_IP}:${HOST_ETCD_PEER_PORT}"
     ETCD_HOSTS="${ETCD_HOSTS}${MY_IP}:${HOST_ETCD_CLIENT_PORT}"
 fi
 
@@ -185,6 +203,45 @@ echo "My IP: $MY_IP"
 echo "ETCD hosts: $ETCD_HOSTS"
 echo "Initial cluster: $ETCD_INITIAL_CLUSTER"
 
+# SSL Certificate Generation
+if [ "$SSL_ENABLED" = "true" ]; then
+    echo "=============================================================================="
+    echo "SSL CERTIFICATE GENERATION"
+    echo "=============================================================================="
+
+    if [ -z "$SSL_PASSPHRASE" ]; then
+        echo "ERROR: SSL_ENABLED is true but SSL_PASSPHRASE is not set"
+        echo "Please set SSL_PASSPHRASE environment variable with a secure passphrase"
+        exit 1
+    fi
+
+    echo "SSL is enabled - generating certificates..."
+
+    # Export required variables for certificate generation script
+    export SSL_PASSPHRASE
+    export SSL_CERT_VALIDITY_DAYS
+    export APP_NAME
+    export MY_IP
+    export CLUSTER_IPS
+
+    # Call certificate generation script
+    /app/generate-certs.sh
+
+    if [ $? -eq 0 ]; then
+        echo "Certificate generation completed successfully"
+        echo "SSL certificates are ready for cluster services"
+    else
+        echo "ERROR: Certificate generation failed"
+        exit 1
+    fi
+else
+    echo "=============================================================================="
+    echo "SSL DISABLED"
+    echo "=============================================================================="
+    echo "SSL_ENABLED is false - skipping certificate generation"
+    echo "All services will use unencrypted communication"
+fi
+
 echo "================================================================================"
 echo "PATRONI CONFIGURATION GENERATION"
 echo "================================================================================"
@@ -194,23 +251,34 @@ echo "Template substitutions:"
 echo "  __MY_NAME__ -> $MY_NAME"
 echo "  __MY_IP__ -> $MY_IP"
 echo "  __ETCD_HOSTS__ -> $ETCD_HOSTS"
+echo "  __ETCD_PROTOCOL__ -> $ETCD_PROTOCOL"
 echo "  __HOST_POSTGRES_PORT__ -> $HOST_POSTGRES_PORT"
 echo "  __HOST_PATRONI_API_PORT__ -> $HOST_PATRONI_API_PORT"
 echo "  __POSTGRES_PORT__ -> $POSTGRES_PORT"
 echo "  __PATRONI_API_PORT__ -> $PATRONI_API_PORT"
 echo "  __POSTGRES_SUPERUSER_PASSWORD__ -> [REDACTED]"
 echo "  __POSTGRES_REPLICATION_PASSWORD__ -> [REDACTED]"
+echo "  __SSL_ENABLED__ -> $SSL_ENABLED"
+
+# Convert SSL_ENABLED to PostgreSQL format (on/off instead of true/false)
+if [ "$SSL_ENABLED" = "true" ]; then
+    POSTGRES_SSL="on"
+else
+    POSTGRES_SSL="off"
+fi
 
 # Generate Patroni configuration from template
 sed -e "s/__MY_NAME__/$MY_NAME/g" \
     -e "s/__MY_IP__/$MY_IP/g" \
     -e "s/__ETCD_HOSTS__/$ETCD_HOSTS/g" \
+    -e "s/__ETCD_PROTOCOL__/$ETCD_PROTOCOL/g" \
     -e "s/__HOST_POSTGRES_PORT__/$HOST_POSTGRES_PORT/g" \
     -e "s/__HOST_PATRONI_API_PORT__/$HOST_PATRONI_API_PORT/g" \
     -e "s/__POSTGRES_PORT__/$POSTGRES_PORT/g" \
     -e "s/__PATRONI_API_PORT__/$PATRONI_API_PORT/g" \
     -e "s/__POSTGRES_SUPERUSER_PASSWORD__/$POSTGRES_SUPERUSER_PASSWORD/g" \
     -e "s/__POSTGRES_REPLICATION_PASSWORD__/$POSTGRES_REPLICATION_PASSWORD/g" \
+    -e "s/__SSL_ENABLED__/$POSTGRES_SSL/g" \
     /app/patroni.yml.tpl > /etc/patroni/patroni.yml
 
 echo "Generated Patroni configuration:"
@@ -235,6 +303,8 @@ ETCD_PEER_PORT=$ETCD_PEER_PORT
 POSTGRES_SUPERUSER_PASSWORD=$POSTGRES_SUPERUSER_PASSWORD
 POSTGRES_REPLICATION_PASSWORD=$POSTGRES_REPLICATION_PASSWORD
 APP_NAME=$APP_NAME
+SSL_ENABLED=$SSL_ENABLED
+SSL_CERT_VALIDITY_DAYS=$SSL_CERT_VALIDITY_DAYS
 EOF
 
 # Prepare PostgreSQL data directory for Patroni

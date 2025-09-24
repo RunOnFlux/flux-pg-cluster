@@ -29,6 +29,16 @@ echo "  APP_NAME: $APP_NAME"
 echo "  HOST_ETCD_CLIENT_PORT: $HOST_ETCD_CLIENT_PORT"
 echo "  HOST_ETCD_PEER_PORT: $HOST_ETCD_PEER_PORT"
 echo "  ETCD_HOSTS: $ETCD_HOSTS"
+echo "  SSL_ENABLED: $SSL_ENABLED"
+
+# Configure etcdctl SSL parameters if SSL is enabled
+if [ "$SSL_ENABLED" = "true" ]; then
+    ETCDCTL_SSL_OPTS="--cert=/etc/ssl/cluster/etcd/client.crt --key=/etc/ssl/cluster/etcd/client.key --cacert=/etc/ssl/cluster/ca/ca.crt"
+    echo "  ETCD SSL: Enabled (using client certificates)"
+else
+    ETCDCTL_SSL_OPTS=""
+    echo "  ETCD SSL: Disabled"
+fi
 
 echo "================================================================================"
 echo "STARTING MONITORING LOOP"
@@ -81,10 +91,10 @@ while true; do
 
     # Test etcd connectivity first (try local endpoint)
     ETCD_ENDPOINT=""
-    if etcdctl --endpoints="$LOCAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
+    if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$LOCAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
         echo "etcd connection successful via local endpoint"
         ETCD_ENDPOINT="$LOCAL_ETCD_ENDPOINT"
-    elif etcdctl --endpoints="$EXTERNAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
+    elif etcdctl $ETCDCTL_SSL_OPTS --endpoints="$EXTERNAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
         echo "etcd connection successful via external endpoint"
         ETCD_ENDPOINT="$EXTERNAL_ETCD_ENDPOINT"
     fi
@@ -94,9 +104,9 @@ while true; do
 
         # Get detailed member list
         echo "Raw etcd member list:"
-        etcdctl --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>&1 || echo "Failed to get JSON output"
+        etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>&1 || echo "Failed to get JSON output"
 
-        CURRENT_MEMBERS=$(etcdctl --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>/dev/null | jq -r '.members[] | select(.clientURLs | length > 0) | .clientURLs[0]' | sed 's|http://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | sort)
+        CURRENT_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>/dev/null | jq -r '.members[] | select(.clientURLs | length > 0) | .clientURLs[0]' | sed 's|https\?://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | sort)
 
         echo "Parsed current etcd members (IPs only):"
         echo "$CURRENT_MEMBERS"
@@ -145,7 +155,7 @@ while true; do
 
                 # Get member ID
                 echo "Looking for member with client URL containing: $CURRENT_IP:${HOST_ETCD_CLIENT_PORT}"
-                MEMBER_ID=$(etcdctl --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>/dev/null | jq -r ".members[] | select(.clientURLs[0] | contains(\"$CURRENT_IP:${HOST_ETCD_CLIENT_PORT}\")) | .ID" | head -n1)
+                MEMBER_ID=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>/dev/null | jq -r ".members[] | select(.clientURLs[0] | contains(\"$CURRENT_IP:${HOST_ETCD_CLIENT_PORT}\")) | .ID" | head -n1)
 
                 echo "Found member ID: $MEMBER_ID"
 
@@ -153,7 +163,7 @@ while true; do
                     echo "$(date): Removing member $CURRENT_IP (ID: $MEMBER_ID) from etcd cluster..."
 
                     # Remove from etcd cluster
-                    if etcdctl --endpoints="$ETCD_ENDPOINT" member remove "$MEMBER_ID" 2>&1; then
+                    if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member remove "$MEMBER_ID" 2>&1; then
                         echo "$(date): Successfully removed member $CURRENT_IP"
                     else
                         echo "$(date): Failed to remove member $CURRENT_IP, it may have already left"

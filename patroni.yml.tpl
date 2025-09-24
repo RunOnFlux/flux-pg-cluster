@@ -10,9 +10,16 @@ restapi:
   listen: 0.0.0.0:__PATRONI_API_PORT__
   connect_address: __MY_IP__:__HOST_PATRONI_API_PORT__
   allowlist_include_members: true
+  certfile: /etc/ssl/cluster/patroni/server.crt
+  keyfile: /etc/ssl/cluster/patroni/server.key
+  cafile: /etc/ssl/cluster/ca/ca.crt
 
 etcd:
   hosts: __ETCD_HOSTS__
+  protocol: __ETCD_PROTOCOL__
+  cacert: /etc/ssl/cluster/ca/ca.crt
+  cert: /etc/ssl/cluster/etcd/client.crt
+  key: /etc/ssl/cluster/etcd/client.key
 
 bootstrap:
   method: initdb
@@ -52,6 +59,8 @@ bootstrap:
   - auth-local: peer
 
   pg_hba:
+  - hostssl replication replicator 0.0.0.0/0 cert clientcert=verify-full
+  - hostssl all all 0.0.0.0/0 md5
   - host replication replicator 0.0.0.0/0 md5
   - host all all 0.0.0.0/0 md5
 
@@ -77,6 +86,13 @@ postgresql:
       password: __POSTGRES_SUPERUSER_PASSWORD__
   parameters:
     unix_socket_directories: '/var/run/postgresql'
+    ssl: '__SSL_ENABLED__'
+    ssl_cert_file: '/etc/ssl/cluster/postgres/server.crt'
+    ssl_key_file: '/etc/ssl/cluster/postgres/server.key'
+    ssl_ca_file: '/etc/ssl/cluster/ca/ca.crt'
+    ssl_crl_file: ''
+    ssl_prefer_server_ciphers: on
+    ssl_ciphers: 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256'
 
 tags:
   nofailover: false

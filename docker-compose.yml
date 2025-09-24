@@ -37,6 +37,8 @@ services:
     hostname: postgres-cluster-node1
     volumes:
       - postgres_data1:/var/lib/postgresql/data
+      - etcd_data1:/var/lib/etcd
+      - ssl_certs1:/etc/ssl/cluster
       - /etc/localtime:/etc/localtime:ro
     networks:
       cluster_network:
@@ -45,6 +47,7 @@ services:
     environment:
       - PGDATA=/var/lib/postgresql/data
       - FLUX_API_URL=http://172.20.0.5:80
+      - SSL_ENABLED=true
     depends_on:
       - mock-api
 
@@ -63,6 +66,8 @@ services:
     hostname: postgres-cluster-node2
     volumes:
       - postgres_data2:/var/lib/postgresql/data
+      - etcd_data2:/var/lib/etcd
+      - ssl_certs2:/etc/ssl/cluster
       - /etc/localtime:/etc/localtime:ro
     networks:
       cluster_network:
@@ -71,6 +76,7 @@ services:
     environment:
       - PGDATA=/var/lib/postgresql/data
       - FLUX_API_URL=http://172.20.0.5:80
+      - SSL_ENABLED=true
     depends_on:
       - mock-api
 
@@ -89,6 +95,8 @@ services:
     hostname: postgres-cluster-node3
     volumes:
       - postgres_data3:/var/lib/postgresql/data
+      - etcd_data3:/var/lib/etcd
+      - ssl_certs3:/etc/ssl/cluster
       - /etc/localtime:/etc/localtime:ro
     networks:
       cluster_network:
@@ -97,6 +105,7 @@ services:
     environment:
       - PGDATA=/var/lib/postgresql/data
       - FLUX_API_URL=http://172.20.0.5:80
+      - SSL_ENABLED=true
     depends_on:
       - mock-api
 
@@ -104,3 +113,9 @@ volumes:
   postgres_data1:
   postgres_data2:
   postgres_data3:
+  etcd_data1:
+  etcd_data2:
+  etcd_data3:
+  ssl_certs1:
+  ssl_certs2:
+  ssl_certs3:
