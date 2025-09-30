@@ -27,9 +27,9 @@ jobs:
         id: tag
         run: |
           if [[ "${{ github.ref }}" == "refs/heads/master" ]]; then
-            echo "tag=latest" >> $GITHUB_OUTPUT
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.ref }}" == "refs/heads/development" ]]; then
-            echo "tag=dev" >> $GITHUB_OUTPUT
+            echo "tag=dev" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build and push Docker image
