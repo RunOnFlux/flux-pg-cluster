@@ -37,7 +37,7 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
      ```
     - Set persistent volume to `/var/lib/postgresql/data` for Container Data
 
-2. **Connect from other Flux applications**:
+2. **Connect from other Flux components**:
    ```bash
    # Use this connection string in your applications:
    postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_your-postgres-app-name:5432/postgres
