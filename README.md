@@ -26,6 +26,7 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 ### Production Deployment on Flux Network
 
 1. **Deploy on Flux**:
+   - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
    - Create your PostgreSQL cluster application on Flux Network
    - Set environment variables in your Flux app configuration:
      ```
