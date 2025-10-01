@@ -1,5 +1,4 @@
 # Flux PostgreSQL Cluster
-did
 ![Version](https://img.shields.io/badge/version-1.0.7-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
