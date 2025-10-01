@@ -27,15 +27,16 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 
 1. **Deploy on Flux**:
    - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
-   - Create your PostgreSQL cluster application on Flux Network
-   - Set environment variables in your Flux app configuration:
+   - Add a component for PostgreSQL
+   - Set environment variables for the PostgreSQL:
      ```
-     APP_NAME=your-postgres-app-name
+     APP_NAME=your-app-name
      POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password
      POSTGRES_REPLICATION_PASSWORD=your-replication-password
      SSL_ENABLED=true
      SSL_PASSPHRASE=your-ssl-passphrase
      ```
+    - Set persistent volume to `/var/lib/postgresql/data` for Container Data
 
 2. **Connect from other Flux applications**:
    ```bash
