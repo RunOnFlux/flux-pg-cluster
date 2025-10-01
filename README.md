@@ -40,10 +40,10 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 2. **Connect from other Flux components**:
    ```bash
    # Use this connection string in your applications:
-   postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_your-postgres-app-name:5432/postgres
+   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres
 
    # With SSL (recommended):
-   postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_your-postgres-app-name:5432/postgres?sslmode=require
+   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres?sslmode=require
    ```
 
 3. **Monitor your cluster**:
@@ -109,10 +109,10 @@ Username: postgres
 Password: [POSTGRES_SUPERUSER_PASSWORD]
 
 Example connection string:
-postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_{APPNAME}:5432/postgres
+postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres
 
 # With SSL enabled:
-postgresql://postgres:[PASSWORD]@flux{COMPONENT_NAME}_{APPNAME}:5432/postgres?sslmode=require
+postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres?sslmode=require
 ```
 
 **For external connections (from host machine or remote clients):**
