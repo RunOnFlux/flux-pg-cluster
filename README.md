@@ -45,7 +45,7 @@ Key Points:
    - Add a component for PostgreSQL
    - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
    - USe the following sample to set the environment variables for the PostgreSQL:
-     ```json
+```json
 [
     "APP_NAME=your-app-name",
     "HOST_POSTGRES_PORT=15432",
@@ -57,6 +57,7 @@ Key Points:
     "SSL_ENABLED=true",
     "SSL_PASSPHRASE=your-ssl-passphrase"
 ]
+```
     - Set Container Data for the component to `/var/lib/postgresql/data`
 
 2. **Connect from other Flux components**:
