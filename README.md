@@ -44,13 +44,19 @@ Key Points:
 1. **Deploy on Flux**:
    - Add a component for PostgreSQL
    - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
-   - Set environment variables for the PostgreSQL:
+   - USe the following sample to set the environment variables for the PostgreSQL:
      ```
-     APP_NAME=your-app-name
-     POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password
-     POSTGRES_REPLICATION_PASSWORD=your-replication-password
-     SSL_ENABLED=true
-     SSL_PASSPHRASE=your-ssl-passphrase
+     [
+    "APP_NAME=your-app-name",
+    "HOST_POSTGRES_PORT=15432",
+    "HOST_PATRONI_API_PORT=18008",
+    "HOST_ETCD_CLIENT_PORT=12379",
+    "HOST_ETCD_PEER_PORT=12380",
+    "POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password",
+    "POSTGRES_REPLICATION_PASSWORD=your-replication-password",
+    "SSL_ENABLED=true",
+    "SSL_PASSPHRASE=your-ssl-passphrase"
+    ]
      ```
     - Set Container Data for the component to `/var/lib/postgresql/data`
 
