@@ -19,21 +19,21 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 #### Architecture Overview
 
 ```
-   ┌──────────────────┐       ┌──────────────────┐       ┌──────────────────┐
-   │      Node 1      │       │      Node 2      │       │       Node 3     │
-   │  ┌────────────┐  │       │  ┌────────────┐  │       │  ┌────────────┐  │
-   │  │  Your App  │  │       │  │  Your App  │  │       │  │  Your App  │  │
-   │  │ (Component)│  │       │  │ (Component)│  │       │  │ (Component)│  │
-   │  └─────┬──────┘  │       │  └─────┬──────┘  │       │  └─────┬──────┘  │
-   │  ┌─────▼──────┐  │       │  ┌─────▼──────┐  │       │  ┌─────▼──────┐  │
-   │  │ PostgreSql │  │       │  │ PostgreSql │  │       │  │ PostgreSql │  │
-   │  │Patroni+ETCD│  │       │  │Patroni+ETCD│  │       │  │Patroni+ETCD│  │
-   │  │   PRIMARY  │◄─┼───────┼─►│  SECONDARY │◄─┼───────┼─►│  SECONDARY │  │
-   │  │(Read+Write)│  │       │  │ (Read-Only)│  │       │  │ (Read-Only)│  │
-   │  └────────────┘  │       │  └────────────┘  │       │  └────────────┘  │
-   └──────────────────┘       └──────────────────┘       └──────────────────┘
-            │                          │                          │ 
-            └──────────────────────────┼──────────────────────────┘
+   ┌───────────────────┐       ┌───────────────────┐       ┌───────────────────┐
+   │      Node 1       │       │      Node 2       │       │       Node 3      │
+   │  ┌─────────────┐  │       │  ┌─────────────┐  │       │  ┌─────────────┐  │
+   │  │  Your App   │  │       │  │  Your App   │  │       │  │  Your App   │  │
+   │  │ (Component) │  │       │  │ (Component) │  │       │  │ (Component) │  │
+   │  └──────┬──────┘  │       │  └──────┬──────┘  │       │  └──────┬──────┘  │
+   │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │
+   │  │ PostgreSql  │  │       │  │ PostgreSql  │  │       │  │ PostgreSql  │  │
+   │  │Patroni+ETCD │  │       │  │Patroni+ETCD │  │       │  │Patroni+ETCD │  │
+   │  │   PRIMARY   │◄─┼───────┼─►│  SECONDARY  │◄─┼───────┼─►│  SECONDARY  │  │
+   │  │(Read+Write) │  │       │  │ (Read-Only) │  │       │  │ (Read-Only) │  │
+   │  └─────────────┘  │       │  └─────────────┘  │       │  └─────────────┘  │
+   └───────────────────┘       └───────────────────┘       └───────────────────┘
+            │                            │                           │ 
+            └────────────────────────────┼───────────────────────────┘
                             Replication via Public Internet
 Key Points:
 • Each application instance connects ONLY to its local PostgreSql instance directly
@@ -46,6 +46,7 @@ Key Points:
    - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
    - Set Container Data for the component to `/var/lib/postgresql/data`
    - USe the following sample to set the environment variables for PostgreSQL component:
+
     ```json
     [
         "APP_NAME=your-app-name",
