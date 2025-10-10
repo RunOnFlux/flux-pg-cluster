@@ -6,14 +6,6 @@
 
 This project creates a self-configuring, highly-available PostgreSQL cluster that dynamically discovers its members through the Flux API. The cluster uses Patroni for PostgreSQL high availability, etcd for distributed coordination, and automatically adapts to nodes being added or removed from the environment.
 
-## Architecture
-
-- **Single Docker Image**: Contains PostgreSQL 14, etcd, Patroni, and automation scripts
-- **Dynamic Discovery**: Calls Flux API to discover cluster members
-- **Auto-Configuration**: Generates configuration files based on live API data
-- **Self-Healing**: Periodically updates cluster membership to match API state
-- **Process Management**: Uses supervisord to manage all services
-
 ## Prerequisites
 
 - Docker
@@ -23,6 +15,31 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 ## Quick Start
 
 ### Production Deployment on Flux Network
+
+#### Architecture Overview
+
+```
+   ┌──────────────────┐       ┌──────────────────┐       ┌──────────────────┐
+   │      Node 1      │       │      Node 2      │       │       Node 3     │
+   │  ┌────────────┐  │       │  ┌────────────┐  │       │  ┌────────────┐  │
+   │  │  Your App  │  │       │  │  Your App  │  │       │  │  Your App  │  │
+   │  │ (Component)│  │       │  │ (Component)│  │       │  │ (Component)│  │
+   │  └─────┬──────┘  │       │  └─────┬──────┘  │       │  └─────┬──────┘  │
+   │  ┌─────▼──────┐  │       │  ┌─────▼──────┐  │       │  ┌─────▼──────┐  │
+   │  │ PostgreSql │  │       │  │ PostgreSql │  │       │  │ PostgreSql │  │
+   │  │Patroni+ETCD│  │       │  │Patroni+ETCD│  │       │  │Patroni+ETCD│  │
+   │  │   PRIMARY  │◄─┼───────┼─►│  SECONDARY │◄─┼───────┼─►│  SECONDARY │  │
+   │  │(Read+Write)│  │       │  │ (Read-Only)│  │       │  │ (Read-Only)│  │
+   │  └────────────┘  │       │  └────────────┘  │       │  └────────────┘  │
+   └──────────────────┘       └──────────────────┘       └──────────────────┘
+            │                          │                          │ 
+            └──────────────────────────┼──────────────────────────┘
+                            Replication via Public Internet
+Key Points:
+• Each application instance connects ONLY to its local PostgreSql instance directly
+• PostgreSql instances replicate data across nodes via public internet
+• Only PRIMARY accepts writes; SECONDARY nodes are read-only
+```
 
 1. **Deploy on Flux**:
    - Add a component for PostgreSQL
