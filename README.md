@@ -42,6 +42,7 @@ Key Points:
 ```
 
 1. **Deploy on Flux**:
+   - Login to home.runonflux.io, and navigate to Applications > Register New App
    - Add a component for PostgreSQL
    - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
    - Set Container Data for the component to `/var/lib/postgresql/data`
