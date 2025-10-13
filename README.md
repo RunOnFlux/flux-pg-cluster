@@ -42,28 +42,28 @@ Key Points:
 ```
 
 1. **Deploy on Flux**:
-   - Login to home.runonflux.io, and navigate to Applications > Register New App
-   - Add a component for PostgreSQL
-   - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
-   - Set Container Data for the component to `/var/lib/postgresql/data`
-   - Add these ports to the `Cont. Ports` field: `[5432,8008,2379,2380]`
-   - Using the `Ports` filed, map those ports to new ones, for example: `[15432,18008,12379,12380]`
-   - For the `Domains` fileds add this:  `["","","",""]`
-   - USe the following sample to set the environment variables for PostgreSQL component:
+  - Log in to home.runonflux.io and navigate to Applications > Register New App.
+  - Add a component for PostgreSQL.
+  - Use the official Docker image: `runonflux/flux-pg-cluster:latest`.
+  - Set the Container Data for the component to `/var/lib/postgresql/data`.
+  - Add these ports to the `Cont. Ports` field: `[5432,8008,2379,2380]`.
+  - Using the `Ports` field, map those ports to new ones, for example: `[15432,18008,12379,12380]`.
+  - For the `Domains` field, add this: `["","","",""]`.
+  - Use the following sample to set the environment variables for the PostgreSQL component:
 
-    ```json
-    [
-        "APP_NAME=your-app-name",
-        "HOST_POSTGRES_PORT=15432",
-        "HOST_PATRONI_API_PORT=18008",
-        "HOST_ETCD_CLIENT_PORT=12379",
-        "HOST_ETCD_PEER_PORT=12380",
-        "POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password",
-        "POSTGRES_REPLICATION_PASSWORD=your-replication-password",
-        "SSL_ENABLED=true",
-        "SSL_PASSPHRASE=your-ssl-passphrase"
-    ]
-    ```
+   ```json
+   [
+      "APP_NAME=your-app-name",
+      "HOST_POSTGRES_PORT=15432",
+      "HOST_PATRONI_API_PORT=18008",
+      "HOST_ETCD_CLIENT_PORT=12379",
+      "HOST_ETCD_PEER_PORT=12380",
+      "POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password",
+      "POSTGRES_REPLICATION_PASSWORD=your-replication-password",
+      "SSL_ENABLED=true",
+      "SSL_PASSPHRASE=your-ssl-passphrase"
+   ]
+   ```
     
 
 2. **Connect from other Flux components**:
