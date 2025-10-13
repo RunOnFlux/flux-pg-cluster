@@ -27,7 +27,7 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
    │  └──────┬──────┘  │       │  └──────┬──────┘  │       │  └──────┬──────┘  │
    │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │
    │  │ PostgreSql  │  │       │  │ PostgreSql  │  │       │  │ PostgreSql  │  │
-   │  │Patroni+ETCD │  │       │  │Patroni+ETCD │  │       │  │Patroni+ETCD │  │
+   │  │Patroni+etcd │  │       │  │Patroni+etcd │  │       │  │Patroni+etcd │  │
    │  │   PRIMARY   │◄─┼───────┼─►│  SECONDARY  │◄─┼───────┼─►│  SECONDARY  │  │
    │  │(Read+Write) │  │       │  │ (Read-Only) │  │       │  │ (Read-Only) │  │
    │  └─────────────┘  │       │  └─────────────┘  │       │  └─────────────┘  │
@@ -45,6 +45,9 @@ Key Points:
    - Add a component for PostgreSQL
    - Use the official Docker image: `runonflux/flux-pg-cluster:latest`
    - Set Container Data for the component to `/var/lib/postgresql/data`
+   - Add these ports to the `Cont. Ports` field: `[5432,8008,2379,2380]`
+   - Using the `Ports` filed, map those ports to new ones, for example: `[15432,18008,12379,12380]`
+   - For the `Domains` fileds add this:  `["","","",""]`
    - USe the following sample to set the environment variables for PostgreSQL component:
 
     ```json
