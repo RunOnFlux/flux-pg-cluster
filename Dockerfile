@@ -40,12 +40,13 @@ COPY entrypoint.sh /app/entrypoint.sh
 COPY patroni.yml.tpl /app/patroni.yml.tpl
 COPY update-cluster.sh /app/update-cluster.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY start-etcd.sh /app/start-etcd.sh
 COPY diagnose.sh /app/diagnose.sh
 COPY generate-certs.sh /app/generate-certs.sh
 COPY VERSION /app/VERSION
 
 # Make scripts executable
-RUN chmod +x /app/entrypoint.sh /app/update-cluster.sh /app/diagnose.sh /app/generate-certs.sh
+RUN chmod +x /app/entrypoint.sh /app/update-cluster.sh /app/diagnose.sh /app/generate-certs.sh /app/start-etcd.sh
 
 # Set working directory
 WORKDIR /app
