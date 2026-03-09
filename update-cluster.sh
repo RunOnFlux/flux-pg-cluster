@@ -31,12 +31,14 @@ echo "  HOST_ETCD_PEER_PORT: $HOST_ETCD_PEER_PORT"
 echo "  ETCD_HOSTS: $ETCD_HOSTS"
 echo "  SSL_ENABLED: $SSL_ENABLED"
 
-# Configure etcdctl SSL parameters if SSL is enabled
+# Configure etcdctl SSL parameters and protocol if SSL is enabled
 if [ "$SSL_ENABLED" = "true" ]; then
-    ETCDCTL_SSL_OPTS="--cert=/etc/ssl/cluster/etcd/client.crt --key=/etc/ssl/cluster/etcd/client.key --cacert=/etc/ssl/cluster/ca/ca.crt"
+    ETCDCTL_SSL_OPTS="--cert-file=/etc/ssl/cluster/etcd/client.crt --key-file=/etc/ssl/cluster/etcd/client.key --ca-file=/etc/ssl/cluster/ca/ca.crt"
+    ETCD_PROTOCOL="https"
     echo "  ETCD SSL: Enabled (using client certificates)"
 else
     ETCDCTL_SSL_OPTS=""
+    ETCD_PROTOCOL="http"
     echo "  ETCD SSL: Disabled"
 fi
 
@@ -81,9 +83,9 @@ while true; do
     CURRENT_MEMBERS=""
 
     # For local connections within the same container, use localhost and internal port
-    LOCAL_ETCD_ENDPOINT="http://127.0.0.1:${ETCD_CLIENT_PORT}"
+    LOCAL_ETCD_ENDPOINT="${ETCD_PROTOCOL}://127.0.0.1:${ETCD_CLIENT_PORT}"
     # For external connections to other nodes, use external IP and host port
-    EXTERNAL_ETCD_ENDPOINT="http://${MY_IP}:${HOST_ETCD_CLIENT_PORT}"
+    EXTERNAL_ETCD_ENDPOINT="${ETCD_PROTOCOL}://${MY_IP}:${HOST_ETCD_CLIENT_PORT}"
 
     echo "Local etcd endpoint: $LOCAL_ETCD_ENDPOINT"
     echo "External etcd endpoint: $EXTERNAL_ETCD_ENDPOINT"
@@ -104,9 +106,10 @@ while true; do
 
         # Get detailed member list
         echo "Raw etcd member list:"
-        etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>&1 || echo "Failed to get JSON output"
+        etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>&1 || echo "Failed to get member list"
 
-        CURRENT_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>/dev/null | jq -r '.members[] | select(.clientURLs | length > 0) | .clientURLs[0]' | sed 's|https\?://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | sort)
+        # Parse v2 etcdctl output format: "id: name=... peerURLs=... clientURLs=https://IP:PORT isLeader=..."
+        CURRENT_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>/dev/null | grep "clientURLs=" | sed 's/.*clientURLs=//' | sed 's/ .*//' | sed 's|https\?://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | sort)
 
         echo "Parsed current etcd members (IPs only):"
         echo "$CURRENT_MEMBERS"
@@ -153,9 +156,9 @@ while true; do
             if [ -n "$CURRENT_IP" ]; then
                 echo "$(date): Processing removal of member: $CURRENT_IP"
 
-                # Get member ID
+                # Get member ID from v2 etcdctl output
                 echo "Looking for member with client URL containing: $CURRENT_IP:${HOST_ETCD_CLIENT_PORT}"
-                MEMBER_ID=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list --write-out=json 2>/dev/null | jq -r ".members[] | select(.clientURLs[0] | contains(\"$CURRENT_IP:${HOST_ETCD_CLIENT_PORT}\")) | .ID" | head -n1)
+                MEMBER_ID=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>/dev/null | grep "clientURLs=.*${CURRENT_IP}:${HOST_ETCD_CLIENT_PORT}" | cut -d: -f1 | tr -d ' ' | head -n1)
 
                 echo "Found member ID: $MEMBER_ID"
 
@@ -188,7 +191,7 @@ while true; do
                 NEW_ETCD_INITIAL_CLUSTER="${NEW_ETCD_INITIAL_CLUSTER},"
                 NEW_ETCD_HOSTS="${NEW_ETCD_HOSTS},"
             fi
-            NEW_ETCD_INITIAL_CLUSTER="${NEW_ETCD_INITIAL_CLUSTER}${NODE_NAME}=http://${IP}:${HOST_ETCD_PEER_PORT}"
+            NEW_ETCD_INITIAL_CLUSTER="${NEW_ETCD_INITIAL_CLUSTER}${NODE_NAME}=${ETCD_PROTOCOL}://${IP}:${HOST_ETCD_PEER_PORT}"
             NEW_ETCD_HOSTS="${NEW_ETCD_HOSTS}${IP}:${HOST_ETCD_CLIENT_PORT}"
         done
 
