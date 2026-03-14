@@ -267,6 +267,23 @@ else
     POSTGRES_SSL="off"
 fi
 
+# Validate passwords for SQL safety
+# Patroni wraps user creation in DO $BEGIN...END$; so $ in passwords breaks SQL
+if echo "$POSTGRES_SUPERUSER_PASSWORD" | grep -qF '$'; then
+    echo "ERROR: POSTGRES_SUPERUSER_PASSWORD contains '\$' which breaks Patroni's SQL."
+    echo "Please use a password without dollar signs."
+    exit 1
+fi
+if echo "$POSTGRES_REPLICATION_PASSWORD" | grep -qF '$'; then
+    echo "ERROR: POSTGRES_REPLICATION_PASSWORD contains '\$' which breaks Patroni's SQL."
+    echo "Please use a password without dollar signs."
+    exit 1
+fi
+
+# Escape passwords for YAML single quotes (' -> '') and sed replacement (& \ / -> escaped)
+ESCAPED_SUPERUSER_PASSWORD=$(printf '%s' "$POSTGRES_SUPERUSER_PASSWORD" | sed "s/'/''/g" | sed 's/[&\\/]/\\&/g')
+ESCAPED_REPLICATION_PASSWORD=$(printf '%s' "$POSTGRES_REPLICATION_PASSWORD" | sed "s/'/''/g" | sed 's/[&\\/]/\\&/g')
+
 # Generate Patroni configuration from template
 sed -e "s/__MY_NAME__/$MY_NAME/g" \
     -e "s/__MY_IP__/$MY_IP/g" \
@@ -276,8 +293,8 @@ sed -e "s/__MY_NAME__/$MY_NAME/g" \
     -e "s/__HOST_PATRONI_API_PORT__/$HOST_PATRONI_API_PORT/g" \
     -e "s/__POSTGRES_PORT__/$POSTGRES_PORT/g" \
     -e "s/__PATRONI_API_PORT__/$PATRONI_API_PORT/g" \
-    -e "s/__POSTGRES_SUPERUSER_PASSWORD__/$POSTGRES_SUPERUSER_PASSWORD/g" \
-    -e "s/__POSTGRES_REPLICATION_PASSWORD__/$POSTGRES_REPLICATION_PASSWORD/g" \
+    -e "s/__POSTGRES_SUPERUSER_PASSWORD__/$ESCAPED_SUPERUSER_PASSWORD/g" \
+    -e "s/__POSTGRES_REPLICATION_PASSWORD__/$ESCAPED_REPLICATION_PASSWORD/g" \
     -e "s/__SSL_ENABLED__/$POSTGRES_SSL/g" \
     /app/patroni.yml.tpl > /etc/patroni/patroni.yml
 

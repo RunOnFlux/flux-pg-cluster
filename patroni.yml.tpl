@@ -66,7 +66,7 @@ bootstrap:
 
   users:
     admin:
-      password: __POSTGRES_SUPERUSER_PASSWORD__
+      password: '__POSTGRES_SUPERUSER_PASSWORD__'
       options:
         - createrole
         - createdb
@@ -80,10 +80,10 @@ postgresql:
   authentication:
     replication:
       username: replicator
-      password: __POSTGRES_REPLICATION_PASSWORD__
+      password: '__POSTGRES_REPLICATION_PASSWORD__'
     superuser:
       username: postgres
-      password: __POSTGRES_SUPERUSER_PASSWORD__
+      password: '__POSTGRES_SUPERUSER_PASSWORD__'
   parameters:
     unix_socket_directories: '/var/run/postgresql'
     ssl: '__SSL_ENABLED__'
