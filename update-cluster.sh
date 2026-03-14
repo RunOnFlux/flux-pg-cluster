@@ -104,12 +104,73 @@ while true; do
     if [ -n "$ETCD_ENDPOINT" ]; then
         echo "Using etcd endpoint: $ETCD_ENDPOINT"
 
-        # Get detailed member list
+        # Get raw member list
+        RAW_MEMBER_LIST=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>/dev/null || true)
         echo "Raw etcd member list:"
-        etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>&1 || echo "Failed to get member list"
+        echo "$RAW_MEMBER_LIST"
+
+        # ================================================================
+        # GHOST MEMBER CLEANUP
+        # Remove members that never fully started — they appear as either:
+        #   "id[unstarted]: peerURLs=..." (no clientURLs at all)
+        #   "id: name=... clientURLs= isLeader=..." (empty clientURLs)
+        # These are nodes added via "member add" but never published.
+        # ================================================================
+        GHOST_MEMBERS=$(echo "$RAW_MEMBER_LIST" | grep -E "\[unstarted\]|clientURLs= " || true)
+        if [ -n "$GHOST_MEMBERS" ]; then
+            echo "$(date): Found ghost members:"
+            echo "$GHOST_MEMBERS"
+            while IFS= read -r GHOST_LINE; do
+                # Extract ID — handle both "id[unstarted]:" and "id:" formats
+                GHOST_ID=$(echo "$GHOST_LINE" | sed 's/\[unstarted\]//' | cut -d: -f1 | tr -d ' ')
+                # Extract IP from peerURLs
+                GHOST_IP=$(echo "$GHOST_LINE" | sed 's/.*peerURLs=//' | sed 's/ .*//' | sed 's|.*://||' | sed 's/:.*//')
+
+                # Only remove if not in desired state
+                if ! echo "$DESIRED_IPS" | grep -q "^${GHOST_IP}$"; then
+                    echo "$(date): Removing ghost member $GHOST_IP (ID: $GHOST_ID) — not in desired state"
+                    etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member remove "$GHOST_ID" 2>&1 || \
+                        echo "$(date): Failed to remove ghost member $GHOST_ID"
+                else
+                    echo "$(date): Ghost member $GHOST_IP is in desired state — may still be starting up, skipping"
+                fi
+            done <<< "$GHOST_MEMBERS"
+
+            # Refresh member list after ghost cleanup
+            RAW_MEMBER_LIST=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>/dev/null || true)
+        fi
+
+        # ================================================================
+        # CLUSTER ID MISMATCH DETECTION
+        # Check if any peer has a different view of the cluster
+        # ================================================================
+        for DESIRED_IP in $DESIRED_IPS; do
+            if [ "$DESIRED_IP" = "$MY_IP" ]; then
+                continue
+            fi
+            PEER_ENDPOINT="${ETCD_PROTOCOL}://${DESIRED_IP}:${HOST_ETCD_CLIENT_PORT}"
+            PEER_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_ENDPOINT" --timeout=5s member list 2>/dev/null || true)
+            if [ -n "$PEER_MEMBERS" ]; then
+                # Check if the peer knows about us
+                if ! echo "$PEER_MEMBERS" | grep -q "$MY_NAME"; then
+                    echo "$(date): CLUSTER ID MISMATCH — peer $DESIRED_IP has a different cluster (does not know about $MY_NAME)"
+                    echo "$(date): Peer's cluster members:"
+                    echo "$PEER_MEMBERS"
+                    echo "$(date): Restarting local etcd to trigger self-healing rejoin..."
+                    # Wipe local data and restart — supervisord will restart us via start-etcd.sh
+                    rm -rf /var/lib/etcd/*
+                    supervisorctl restart etcd 2>/dev/null || true
+                    # Sleep to let etcd restart before next cycle
+                    sleep 60
+                    break 2  # Break out of both the for loop and the if block
+                fi
+                # One reachable peer is enough to verify
+                break
+            fi
+        done
 
         # Parse v2 etcdctl output format: "id: name=... peerURLs=... clientURLs=https://IP:PORT isLeader=..."
-        CURRENT_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>/dev/null | grep "clientURLs=" | sed 's/.*clientURLs=//' | sed 's/ .*//' | sed 's|https\?://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | sort)
+        CURRENT_MEMBERS=$(echo "$RAW_MEMBER_LIST" | grep "clientURLs=" | sed 's/.*clientURLs=//' | sed 's/ .*//' | sed 's|https\?://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | grep -v "^$" | sort)
 
         echo "Parsed current etcd members (IPs only):"
         echo "$CURRENT_MEMBERS"
