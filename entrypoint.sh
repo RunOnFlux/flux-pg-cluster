@@ -26,6 +26,7 @@ echo "==========================================================================
 
 # Set defaults if not provided
 APP_NAME=${APP_NAME:-postgres-cluster}
+POSTGRES_DB=${POSTGRES_DB:-postgres}
 POSTGRES_SUPERUSER_PASSWORD=${POSTGRES_SUPERUSER_PASSWORD:-postgres}
 POSTGRES_REPLICATION_PASSWORD=${POSTGRES_REPLICATION_PASSWORD:-replication}
 
@@ -256,6 +257,7 @@ echo "  __HOST_POSTGRES_PORT__ -> $HOST_POSTGRES_PORT"
 echo "  __HOST_PATRONI_API_PORT__ -> $HOST_PATRONI_API_PORT"
 echo "  __POSTGRES_PORT__ -> $POSTGRES_PORT"
 echo "  __PATRONI_API_PORT__ -> $PATRONI_API_PORT"
+echo "  __POSTGRES_DB__ -> $POSTGRES_DB"
 echo "  __POSTGRES_SUPERUSER_PASSWORD__ -> [REDACTED]"
 echo "  __POSTGRES_REPLICATION_PASSWORD__ -> [REDACTED]"
 echo "  __SSL_ENABLED__ -> $SSL_ENABLED"
@@ -293,6 +295,7 @@ sed -e "s/__MY_NAME__/$MY_NAME/g" \
     -e "s/__HOST_PATRONI_API_PORT__/$HOST_PATRONI_API_PORT/g" \
     -e "s/__POSTGRES_PORT__/$POSTGRES_PORT/g" \
     -e "s/__PATRONI_API_PORT__/$PATRONI_API_PORT/g" \
+    -e "s/__POSTGRES_DB__/$POSTGRES_DB/g" \
     -e "s/__POSTGRES_SUPERUSER_PASSWORD__/$ESCAPED_SUPERUSER_PASSWORD/g" \
     -e "s/__POSTGRES_REPLICATION_PASSWORD__/$ESCAPED_REPLICATION_PASSWORD/g" \
     -e "s/__SSL_ENABLED__/$POSTGRES_SSL/g" \
