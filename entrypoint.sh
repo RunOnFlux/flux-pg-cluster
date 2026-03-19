@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Ensure all app scripts are executable (handles docker cp without permission preservation)
+chmod +x /app/*.sh 2>/dev/null || true
+
 echo "================================================================================"
 echo "FLUX POSTGRESQL CLUSTER - DYNAMIC PATRONI CLUSTER"
 echo "Version: $(cat /app/VERSION 2>/dev/null || echo 'Unknown')"
