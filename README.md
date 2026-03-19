@@ -60,6 +60,7 @@ Key Points:
       "HOST_ETCD_PEER_PORT=12380",
       "POSTGRES_SUPERUSER_PASSWORD=your-super-secret-password",
       "POSTGRES_REPLICATION_PASSWORD=your-replication-password",
+      "POSTGRES_DB=your-app-database",
       "SSL_ENABLED=true",
       "SSL_PASSPHRASE=your-ssl-passphrase"
    ]
@@ -69,10 +70,10 @@ Key Points:
 2. **Connect from other Flux components**:
    ```bash
    # Use this connection string in your applications:
-   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres
+   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]
 
    # With SSL (recommended):
-   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres?sslmode=require
+   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]?sslmode=require
    ```
 
 3. **Monitor your cluster**:
@@ -97,7 +98,7 @@ Key Points:
 | `POSTGRES_SUPERUSER_PASSWORD` | PostgreSQL superuser password | Required |
 | `POSTGRES_REPLICATION_PASSWORD` | PostgreSQL replication user password | Required |
 | `POSTGRES_USER` | PostgreSQL username | `postgres` |
-| `POSTGRES_DB` | Default PostgreSQL database | `postgres` |
+| `POSTGRES_DB` | Application database created on first bootstrap, owned by the `admin` role. Use `postgres` to skip creation of a separate database. | `postgres` |
 | `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
 | `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
 | `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
