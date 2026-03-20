@@ -197,7 +197,13 @@ while true; do
                         rm --recursive /patroni/postgres-cluster/ 2>/dev/null || true
                     echo "$(date): Patroni cluster state cleared — nodes will re-bootstrap on next Patroni restart"
                 else
-                    echo "$(date): Active leader exists ($PATRONI_LEADER) — skipping clear (safe guard)"
+                    # Active leader exists — this node's postgres data belongs to a different cluster.
+                    # Wipe local data so Patroni re-clones from the primary instead of looping.
+                    echo "$(date): Active leader ($PATRONI_LEADER) exists — wiping local postgres data for re-clone from primary..."
+                    supervisorctl stop patroni 2>/dev/null || true
+                    rm -rf /var/lib/postgresql/data/*
+                    supervisorctl start patroni 2>/dev/null || true
+                    echo "$(date): Local postgres data wiped — Patroni will re-clone from $PATRONI_LEADER"
                 fi
             fi
         fi
