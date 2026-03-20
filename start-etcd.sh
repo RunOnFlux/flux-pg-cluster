@@ -33,7 +33,11 @@ echo "  INITIAL_CLUSTER=${ETCD_INITIAL_CLUSTER}"
 OTHER_IPS=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | grep -v "$MY_NAME=" | sed 's/.*=.*:\/\///' | sed 's/:.*//')
 
 # Function to check if a peer cluster is reachable and attempt to join it
+# Pass FORCE_REJOIN=1 when local data was wiped — forces member remove+add instead of
+# treating an existing registration as a normal restart (which would panic on empty raft log).
 try_join_existing_cluster() {
+    local FORCE_REJOIN="${1:-0}"
+
     for PEER_IP in $OTHER_IPS; do
         PEER_CLIENT_URL="${PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
         echo "  Trying peer at: $PEER_CLIENT_URL"
@@ -45,12 +49,17 @@ try_join_existing_cluster() {
             EXISTING_MEMBER=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member list 2>/dev/null | grep "$MY_NAME" || true)
 
             if [ -n "$EXISTING_MEMBER" ]; then
-                # Check if it has empty clientURLs or is unstarted (ghost from failed previous join)
+                # Detect ghost (unstarted or empty clientURLs)
                 GHOST_CHECK=$(echo "$EXISTING_MEMBER" | grep -E "\[unstarted\]|clientURLs= " || true)
-                if [ -n "$GHOST_CHECK" ]; then
-                    echo "  Found ghost registration (empty clientURLs) — removing and re-adding..."
-                    GHOST_ID=$(echo "$EXISTING_MEMBER" | cut -d: -f1 | tr -d ' ')
-                    etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member remove "$GHOST_ID" 2>&1 || true
+
+                if [ -n "$GHOST_CHECK" ] || [ "$FORCE_REJOIN" = "1" ]; then
+                    if [ -n "$GHOST_CHECK" ]; then
+                        echo "  Found ghost registration (empty clientURLs) — removing and re-adding..."
+                    else
+                        echo "  Data was wiped — removing stale member entry to force fresh sync..."
+                    fi
+                    EXISTING_ID=$(echo "$EXISTING_MEMBER" | cut -d: -f1 | tr -d ' ')
+                    etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member remove "$EXISTING_ID" 2>&1 || true
                     sleep 2
                     # Fall through to add below
                 else
@@ -146,6 +155,7 @@ if [ -f /var/lib/etcd/member/snap/db ]; then
     if [ $VERIFY_RESULT -eq 2 ]; then
         echo "  CLUSTER ID MISMATCH DETECTED — wiping data and rejoining..."
         rm -rf /var/lib/etcd/*
+        FORCE_REJOIN=1
         # Fall through to the "no data directory" path below
     elif [ $VERIFY_RESULT -eq 0 ]; then
         CLUSTER_STATE=existing
@@ -166,7 +176,7 @@ if [ -z "$CLUSTER_STATE" ]; then
     RETRY_DELAY=10
     for i in $(seq 1 $MAX_RETRIES); do
         echo "  Peer discovery attempt $i/$MAX_RETRIES..."
-        if try_join_existing_cluster; then
+        if try_join_existing_cluster "${FORCE_REJOIN:-0}"; then
             break
         fi
 
