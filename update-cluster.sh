@@ -169,6 +169,39 @@ while true; do
             fi
         done
 
+        # ================================================================
+        # PATRONI SYSTEM ID MISMATCH SELF-HEALING
+        # Detects when the Patroni initialize key in etcd contains a
+        # system ID that doesn't match local postgres data — this happens
+        # when a brief failed bootstrap wrote a new system ID to etcd but
+        # all nodes still have data from the original cluster.
+        # Safe guard: only clears when no active Patroni leader exists.
+        # ================================================================
+        if [ -d /var/lib/postgresql/data/global ]; then
+            LOCAL_SYS_ID=$(/usr/lib/postgresql/14/bin/pg_controldata /var/lib/postgresql/data 2>/dev/null \
+                | grep "Database system identifier" | awk '{print $NF}' || true)
+            ETCD_SYS_ID=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" \
+                get /patroni/postgres-cluster/initialize 2>/dev/null || true)
+
+            if [ -n "$LOCAL_SYS_ID" ] && [ -n "$ETCD_SYS_ID" ] && [ "$LOCAL_SYS_ID" != "$ETCD_SYS_ID" ]; then
+                echo "$(date): PATRONI SYSTEM ID MISMATCH DETECTED"
+                echo "  Local postgres system ID : $LOCAL_SYS_ID"
+                echo "  etcd initialize key value: $ETCD_SYS_ID"
+
+                # Only clear if no active Patroni leader is holding the lock
+                PATRONI_LEADER=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" \
+                    get /patroni/postgres-cluster/leader 2>/dev/null || true)
+                if [ -z "$PATRONI_LEADER" ]; then
+                    echo "$(date): No active Patroni leader — clearing stale Patroni cluster state to allow re-bootstrap..."
+                    etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" \
+                        rm --recursive /patroni/postgres-cluster/ 2>/dev/null || true
+                    echo "$(date): Patroni cluster state cleared — nodes will re-bootstrap on next Patroni restart"
+                else
+                    echo "$(date): Active leader exists ($PATRONI_LEADER) — skipping clear (safe guard)"
+                fi
+            fi
+        fi
+
         # Parse v2 etcdctl output format: "id: name=... peerURLs=... clientURLs=https://IP:PORT isLeader=..."
         CURRENT_MEMBERS=$(echo "$RAW_MEMBER_LIST" | grep "clientURLs=" | sed 's/.*clientURLs=//' | sed 's/ .*//' | sed 's|https\?://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | grep -v "^$" | sort)
 
