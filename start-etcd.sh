@@ -42,7 +42,7 @@ try_join_existing_cluster() {
         PEER_CLIENT_URL="${PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
         echo "  Trying peer at: $PEER_CLIENT_URL"
 
-        if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" --timeout=5s cluster-health >/dev/null 2>&1; then
+        if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" --timeout=5s member list >/dev/null 2>&1; then
             echo "  Found existing cluster via $PEER_IP"
 
             # Check if this node is already a member
