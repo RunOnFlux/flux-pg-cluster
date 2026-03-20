@@ -144,8 +144,12 @@ if [ -f /var/lib/etcd/member/snap/db ]; then
     # Wait for it to start
     sleep 10
 
+    # Disable set -e for this call: verify_cluster_id returns non-zero on mismatch/unreachable,
+    # and set -e would exit the script before we can capture and act on the result.
+    set +e
     verify_cluster_id
     VERIFY_RESULT=$?
+    set -e
 
     # Kill the temporary etcd
     kill $ETCD_PID 2>/dev/null || true
