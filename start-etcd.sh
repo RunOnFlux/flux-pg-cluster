@@ -161,9 +161,35 @@ if [ -f /var/lib/etcd/member/snap/db ]; then
         CLUSTER_STATE=existing
         echo "  CLUSTER_STATE=existing (verified — same cluster)"
     else
-        # Can't verify (no peers reachable) — trust existing data
-        CLUSTER_STATE=existing
-        echo "  CLUSTER_STATE=existing (data directory found, no peers to verify)"
+        # Local etcd didn't respond — check if peers see us as a full member.
+        # If they do, our local data is corrupt (empty raft log): wipe and force-rejoin
+        # so the leader sends a snapshot instead of a heartbeat (which would cause a panic).
+        PEER_SEES_US_AS_FULL=0
+        for PEER_IP in $OTHER_IPS; do
+            PEER_CLIENT_URL="${PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
+            PEER_OUTPUT=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" --timeout=5s member list 2>/dev/null || true)
+            if [ -n "$PEER_OUTPUT" ]; then
+                OUR_ENTRY=$(echo "$PEER_OUTPUT" | grep "$MY_NAME" || true)
+                if [ -n "$OUR_ENTRY" ]; then
+                    GHOST_CHECK=$(echo "$OUR_ENTRY" | grep -E "\[unstarted\]|clientURLs= " || true)
+                    if [ -z "$GHOST_CHECK" ]; then
+                        echo "  Peer $PEER_IP sees us as a full member but local etcd did not respond — data is likely corrupt"
+                        PEER_SEES_US_AS_FULL=1
+                    fi
+                fi
+                break
+            fi
+        done
+
+        if [ $PEER_SEES_US_AS_FULL -eq 1 ]; then
+            echo "  CORRUPT DATA DETECTED — wiping and force rejoining to receive fresh snapshot..."
+            rm -rf /var/lib/etcd/*
+            FORCE_REJOIN=1
+        else
+            # No peers reachable or we appear as ghost — trust existing data
+            CLUSTER_STATE=existing
+            echo "  CLUSTER_STATE=existing (data directory found, no peers to verify)"
+        fi
     fi
 fi
 
