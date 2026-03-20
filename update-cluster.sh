@@ -202,6 +202,32 @@ while true; do
             fi
         fi
 
+        # ================================================================
+        # STALE PATRONI LEADER CLEANUP
+        # If the declared Patroni leader's REST API is unreachable and
+        # we have local postgres data, clear the leader key to trigger
+        # re-election. This unblocks fresh-install nodes that are
+        # waiting for a data source but can't reach the stale leader.
+        # Safe guards:
+        #   - only runs when we have local postgres data (we are a
+        #     viable leader candidate — won't create a blank cluster)
+        #   - never clears our own leader key
+        # ================================================================
+        PATRONI_LEADER=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" \
+            get /patroni/postgres-cluster/leader 2>/dev/null || true)
+        if [ -n "$PATRONI_LEADER" ] && [ "$PATRONI_LEADER" != "$MY_NAME" ] && [ -d /var/lib/postgresql/data/global ]; then
+            LEADER_IP=$(echo "$PATRONI_LEADER" | sed 's/^node-//' | tr '-' '.')
+            PATRONI_SCHEME=$([ "$SSL_ENABLED" = "true" ] && echo "https" || echo "http")
+            LEADER_API="${PATRONI_SCHEME}://${LEADER_IP}:${HOST_PATRONI_API_PORT}"
+            if ! curl -s -k --max-time 5 "${LEADER_API}/health" >/dev/null 2>&1; then
+                echo "$(date): Patroni leader $PATRONI_LEADER is unreachable at $LEADER_API"
+                echo "$(date): Clearing stale leader key to trigger re-election (local data present)..."
+                etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" \
+                    rm /patroni/postgres-cluster/leader 2>/dev/null || true
+                echo "$(date): Stale leader key cleared — Patroni will elect a new leader"
+            fi
+        fi
+
         # Parse v2 etcdctl output format: "id: name=... peerURLs=... clientURLs=https://IP:PORT isLeader=..."
         CURRENT_MEMBERS=$(echo "$RAW_MEMBER_LIST" | grep "clientURLs=" | sed 's/.*clientURLs=//' | sed 's/ .*//' | sed 's|https\?://||g' | sed "s|:${HOST_ETCD_CLIENT_PORT}||g" | grep -v "^$" | sort)
 
