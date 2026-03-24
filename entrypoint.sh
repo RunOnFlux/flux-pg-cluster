@@ -27,8 +27,16 @@ echo "==========================================================================
 echo "DOCKER ENVIRONMENT VARIABLES"
 echo "================================================================================"
 
-# Set defaults if not provided
-APP_NAME=${APP_NAME:-postgres-cluster}
+# Resolve APP_NAME: try local Flux hostinfo API first, fall back to env, then default
+HOSTINFO_APP_NAME=$(curl -sf --max-time 3 http://fluxnode.service:16101/hostinfo 2>/dev/null \
+    | grep -o '"appName":"[^"]*"' | cut -d'"' -f4 || true)
+if [ -n "$HOSTINFO_APP_NAME" ]; then
+    APP_NAME="$HOSTINFO_APP_NAME"
+    echo "APP_NAME resolved from hostinfo API: $APP_NAME"
+else
+    APP_NAME=${APP_NAME:-postgres-cluster}
+    echo "APP_NAME from environment/default: $APP_NAME"
+fi
 POSTGRES_DB=${POSTGRES_DB:-postgres}
 POSTGRES_SUPERUSER_PASSWORD=${POSTGRES_SUPERUSER_PASSWORD:-postgres}
 POSTGRES_REPLICATION_PASSWORD=${POSTGRES_REPLICATION_PASSWORD:-replication}
