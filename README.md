@@ -53,7 +53,6 @@ Key Points:
 
    ```json
    [
-      "APP_NAME=your-app-name",
       "HOST_POSTGRES_PORT=15432",
       "HOST_PATRONI_API_PORT=18008",
       "HOST_ETCD_CLIENT_PORT=12379",
@@ -86,7 +85,6 @@ Key Points:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `APP_NAME` | Flux application name for API discovery | `myapp-postgres` |
 | `HOST_POSTGRES_PORT` | Host PostgreSQL port mapping | `5432` |
 | `HOST_PATRONI_API_PORT` | Host Patroni REST API port mapping | `8008` |
 | `HOST_ETCD_CLIENT_PORT` | Host etcd client port mapping | `2379` |
