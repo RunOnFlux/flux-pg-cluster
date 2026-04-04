@@ -33,11 +33,13 @@ EXPECTED_MEMBER_COUNT=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | grep -c '='
 BOOTSTRAP_CANDIDATE_NAME=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | sed 's/=.*//' | sort | head -n1)
 ALLOW_NEW_CLUSTER_BOOTSTRAP=${ALLOW_NEW_CLUSTER_BOOTSTRAP:-false}
 ALLOW_ANY_NODE_BOOTSTRAP=${ALLOW_ANY_NODE_BOOTSTRAP:-false}
+AUTO_BOOTSTRAP_IF_FRESH=${AUTO_BOOTSTRAP_IF_FRESH:-true}
 
 echo "  EXPECTED_MEMBER_COUNT=${EXPECTED_MEMBER_COUNT}"
 echo "  BOOTSTRAP_CANDIDATE_NAME=${BOOTSTRAP_CANDIDATE_NAME}"
 echo "  ALLOW_NEW_CLUSTER_BOOTSTRAP=${ALLOW_NEW_CLUSTER_BOOTSTRAP}"
 echo "  ALLOW_ANY_NODE_BOOTSTRAP=${ALLOW_ANY_NODE_BOOTSTRAP}"
+echo "  AUTO_BOOTSTRAP_IF_FRESH=${AUTO_BOOTSTRAP_IF_FRESH}"
 
 # Extract other members' IPs from ETCD_INITIAL_CLUSTER
 OTHER_IPS=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | grep -v "$MY_NAME=" | sed 's/.*=.*:\/\///' | sed 's/:.*//')
@@ -251,21 +253,54 @@ if [ -z "$CLUSTER_STATE" ]; then
             CLUSTER_STATE=new
             echo "  Single-member configuration detected — bootstrapping as new"
         else
-            if [ "$ALLOW_NEW_CLUSTER_BOOTSTRAP" != "true" ]; then
-                echo "  Multi-member cluster and no existing peer found."
-                echo "  Refusing automatic new cluster bootstrap to prevent split-brain."
-                echo "  Set ALLOW_NEW_CLUSTER_BOOTSTRAP=true on exactly one node for first-time bootstrap only."
-                exit 1
+            ETCD_DATA_EMPTY=0
+            POSTGRES_DATA_EMPTY=0
+
+            if [ ! -f /var/lib/etcd/member/snap/db ]; then
+                ETCD_DATA_EMPTY=1
             fi
 
-            if [ "$ALLOW_ANY_NODE_BOOTSTRAP" != "true" ] && [ "$MY_NAME" != "$BOOTSTRAP_CANDIDATE_NAME" ]; then
+            if [ ! -d /var/lib/postgresql/data/global ]; then
+                POSTGRES_DATA_EMPTY=1
+            fi
+
+            # Safe first-bootstrap fallback for fresh installations.
+            # For a brand new multi-member cluster, all empty-data nodes must be allowed to
+            # start in "new" mode so etcd can form quorum. Restricting bootstrap to one node
+            # would deadlock because a single member cannot serve member list/member add without quorum.
+            if [ "$ALLOW_NEW_CLUSTER_BOOTSTRAP" != "true" ]; then
+                if [ "$AUTO_BOOTSTRAP_IF_FRESH" = "true" ] && [ "$ETCD_DATA_EMPTY" -eq 1 ] && [ "$POSTGRES_DATA_EMPTY" -eq 1 ]; then
+                    CLUSTER_STATE=new
+                    if [ "$MY_NAME" = "$BOOTSTRAP_CANDIDATE_NAME" ]; then
+                        echo "  Fresh multi-member install detected on deterministic bootstrap candidate."
+                    else
+                        echo "  Fresh multi-member install detected on non-candidate node."
+                        echo "  Allowing coordinated first-bootstrap to form quorum."
+                    fi
+                    echo "  Auto-bootstrapping new cluster safely (data dirs are empty)."
+                else
+                    echo "  Multi-member cluster and no existing peer found."
+                    echo "  Refusing automatic new cluster bootstrap to prevent split-brain."
+                    echo "  Auto-bootstrap conditions not met:"
+                    echo "    candidate=$MY_NAME==$BOOTSTRAP_CANDIDATE_NAME"
+                    echo "    etcd_data_empty=$ETCD_DATA_EMPTY"
+                    echo "    postgres_data_empty=$POSTGRES_DATA_EMPTY"
+                    echo "    AUTO_BOOTSTRAP_IF_FRESH=$AUTO_BOOTSTRAP_IF_FRESH"
+                    echo "  Set ALLOW_NEW_CLUSTER_BOOTSTRAP=true only for controlled first bootstrap if needed."
+                    exit 1
+                fi
+            fi
+
+            if [ -z "$CLUSTER_STATE" ] && [ "$ALLOW_ANY_NODE_BOOTSTRAP" != "true" ] && [ "$MY_NAME" != "$BOOTSTRAP_CANDIDATE_NAME" ]; then
                 echo "  Bootstrap is restricted to deterministic candidate $BOOTSTRAP_CANDIDATE_NAME."
                 echo "  Current node $MY_NAME is not allowed to bootstrap a new multi-member cluster."
                 exit 1
             fi
 
-            CLUSTER_STATE=new
-            echo "  Explicit bootstrap override enabled — bootstrapping new cluster"
+            if [ -z "$CLUSTER_STATE" ]; then
+                CLUSTER_STATE=new
+                echo "  Explicit bootstrap override enabled — bootstrapping new cluster"
+            fi
         fi
     fi
 fi
