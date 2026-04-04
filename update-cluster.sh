@@ -42,6 +42,14 @@ else
     echo "  ETCD SSL: Disabled"
 fi
 
+UPDATE_INTERVAL_SECONDS=${UPDATE_INTERVAL_SECONDS:-300}
+DESIRED_STATE_STABILITY_CYCLES=${DESIRED_STATE_STABILITY_CYCLES:-3}
+STATE_TRACK_FILE=${STATE_TRACK_FILE:-/tmp/desired-state-tracker}
+
+echo "  UPDATE_INTERVAL_SECONDS: $UPDATE_INTERVAL_SECONDS"
+echo "  DESIRED_STATE_STABILITY_CYCLES: $DESIRED_STATE_STABILITY_CYCLES"
+echo "  STATE_TRACK_FILE: $STATE_TRACK_FILE"
+
 echo "================================================================================"
 echo "STARTING MONITORING LOOP"
 echo "================================================================================"
@@ -70,14 +78,36 @@ while true; do
 
     if [ -z "$DESIRED_IPS" ]; then
         echo "$(date): WARNING: No IPs found in API response, skipping update cycle"
-        echo "Sleeping for 5 minutes (300 seconds)..."
-        sleep 300
+        echo "Sleeping for $UPDATE_INTERVAL_SECONDS seconds..."
+        sleep "$UPDATE_INTERVAL_SECONDS"
         continue
+    fi
+
+    DESIRED_SIGNATURE=$(echo "$DESIRED_IPS" | tr '\n' ',' | sed 's/,$//')
+    LAST_SIGNATURE=""
+    STABLE_COUNT=0
+    if [ -f "$STATE_TRACK_FILE" ]; then
+        LAST_SIGNATURE=$(sed -n '1p' "$STATE_TRACK_FILE" 2>/dev/null || true)
+        STABLE_COUNT=$(sed -n '2p' "$STATE_TRACK_FILE" 2>/dev/null || echo 0)
+    fi
+
+    if [ "$DESIRED_SIGNATURE" = "$LAST_SIGNATURE" ]; then
+        STABLE_COUNT=$((STABLE_COUNT + 1))
+    else
+        STABLE_COUNT=1
+    fi
+
+    printf '%s\n%s\n' "$DESIRED_SIGNATURE" "$STABLE_COUNT" > "$STATE_TRACK_FILE"
+
+    STATE_STABLE=false
+    if [ "$STABLE_COUNT" -ge "$DESIRED_STATE_STABILITY_CYCLES" ]; then
+        STATE_STABLE=true
     fi
 
     echo "$(date): Desired cluster IPs (ports stripped):"
     echo "$DESIRED_IPS"
     echo "Number of desired members: $(echo "$DESIRED_IPS" | wc -l)"
+    echo "Desired state stability: count=$STABLE_COUNT threshold=$DESIRED_STATE_STABILITY_CYCLES stable=$STATE_STABLE"
 
     echo "Getting current etcd cluster state..."
     CURRENT_MEMBERS=""
@@ -142,8 +172,13 @@ while true; do
 
         # ================================================================
         # CLUSTER ID MISMATCH DETECTION
-        # Check if any peer has a different view of the cluster
+        # Evaluate all reachable peers; only self-heal if mismatched view
+        # is the majority among reachable peers.
         # ================================================================
+        REACHABLE_PEERS=0
+        MATCHING_PEERS=0
+        MISMATCH_PEERS=0
+        MISMATCHED_IPS=""
         for DESIRED_IP in $DESIRED_IPS; do
             if [ "$DESIRED_IP" = "$MY_IP" ]; then
                 continue
@@ -151,23 +186,36 @@ while true; do
             PEER_ENDPOINT="${ETCD_PROTOCOL}://${DESIRED_IP}:${HOST_ETCD_CLIENT_PORT}"
             PEER_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_ENDPOINT" --timeout=5s member list 2>/dev/null || true)
             if [ -n "$PEER_MEMBERS" ]; then
+                REACHABLE_PEERS=$((REACHABLE_PEERS + 1))
                 # Check if the peer knows about us
-                if ! echo "$PEER_MEMBERS" | grep -q "$MY_NAME"; then
+                if echo "$PEER_MEMBERS" | grep -q "$MY_NAME"; then
+                    MATCHING_PEERS=$((MATCHING_PEERS + 1))
+                else
+                    MISMATCH_PEERS=$((MISMATCH_PEERS + 1))
+                    MISMATCHED_IPS="$MISMATCHED_IPS $DESIRED_IP"
                     echo "$(date): CLUSTER ID MISMATCH — peer $DESIRED_IP has a different cluster (does not know about $MY_NAME)"
-                    echo "$(date): Peer's cluster members:"
-                    echo "$PEER_MEMBERS"
-                    echo "$(date): Restarting local etcd to trigger self-healing rejoin..."
-                    # Wipe local data and restart — supervisord will restart us via start-etcd.sh
-                    rm -rf /var/lib/etcd/*
-                    supervisorctl restart etcd 2>/dev/null || true
-                    # Sleep to let etcd restart before next cycle
-                    sleep 60
-                    break 2  # Break out of both the for loop and the if block
                 fi
-                # One reachable peer is enough to verify
-                break
             fi
         done
+
+        if [ "$REACHABLE_PEERS" -gt 0 ]; then
+            echo "$(date): Peer verification summary: reachable=$REACHABLE_PEERS matching=$MATCHING_PEERS mismatched=$MISMATCH_PEERS"
+            if [ "$MISMATCH_PEERS" -gt "$MATCHING_PEERS" ]; then
+                echo "$(date): Majority of reachable peers disagree ($MISMATCHED_IPS) — restarting local etcd for self-healing rejoin..."
+                # Wipe local data and restart — supervisord will restart us via start-etcd.sh
+                rm -rf /var/lib/etcd/*
+                supervisorctl restart etcd 2>/dev/null || true
+                # Sleep to let etcd restart before next cycle
+                sleep 60
+                continue
+            fi
+
+            if [ "$MISMATCH_PEERS" -gt 0 ]; then
+                echo "$(date): Divergent peer views detected but not majority mismatch; skipping destructive heal this cycle"
+            fi
+        else
+            echo "$(date): No reachable peers for mismatch verification this cycle"
+        fi
 
         # ================================================================
         # PATRONI SYSTEM ID MISMATCH SELF-HEALING
@@ -245,13 +293,23 @@ while true; do
         echo "Tried local: $LOCAL_ETCD_ENDPOINT"
         echo "Tried external: $EXTERNAL_ETCD_ENDPOINT"
         echo "This might be normal if etcd is still starting up"
-        echo "Sleeping for 5 minutes (300 seconds)..."
-        sleep 300
+        echo "Sleeping for $UPDATE_INTERVAL_SECONDS seconds..."
+        sleep "$UPDATE_INTERVAL_SECONDS"
         continue
     fi
 
     if [ -n "$CURRENT_MEMBERS" ]; then
         echo "$(date): Processing cluster member differences..."
+
+        if [ "$STATE_STABLE" != "true" ]; then
+            echo "$(date): Desired state not stable long enough — skipping member removals and ETCD_INITIAL_CLUSTER rewrite"
+            echo "$(date): Current stability count: $STABLE_COUNT/$DESIRED_STATE_STABILITY_CYCLES"
+            echo "================================================================================"
+            echo "$(date): Cluster update cycle complete, sleeping for $UPDATE_INTERVAL_SECONDS seconds..."
+            echo "================================================================================"
+            sleep "$UPDATE_INTERVAL_SECONDS"
+            continue
+        fi
 
         # Find members to remove (in current but not in desired)
         MEMBERS_TO_REMOVE=""
@@ -331,7 +389,7 @@ while true; do
     fi
 
     echo "================================================================================"
-    echo "$(date): Cluster update cycle complete, sleeping for 5 minutes (300 seconds)..."
+    echo "$(date): Cluster update cycle complete, sleeping for $UPDATE_INTERVAL_SECONDS seconds..."
     echo "================================================================================"
-    sleep 300
+    sleep "$UPDATE_INTERVAL_SECONDS"
 done

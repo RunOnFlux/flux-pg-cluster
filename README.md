@@ -100,6 +100,19 @@ Key Points:
 | `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
 | `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
 | `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
+| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Allow creating a new multi-member etcd cluster when no peers are reachable. Keep `false` during normal operations. | `false` |
+| `ALLOW_ANY_NODE_BOOTSTRAP` | If `true`, bypass deterministic bootstrap-candidate restriction. Keep `false` for safety. | `false` |
+| `ETCD_JOIN_MAX_RETRIES` | How many peer-join attempts are made before deciding bootstrap behavior | `12` |
+| `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
+| `UPDATE_INTERVAL_SECONDS` | Update daemon reconciliation interval | `300` |
+| `DESIRED_STATE_STABILITY_CYCLES` | API desired-state cycles required before membership removal/rewrite | `3` |
+
+### Split-Brain Prevention Controls
+
+- Multi-member clusters no longer auto-bootstrap as new unless `ALLOW_NEW_CLUSTER_BOOTSTRAP=true`.
+- By default, only one deterministic bootstrap candidate (lowest node name) may bootstrap a new cluster.
+- Mismatch detection evaluates all reachable peers and only performs destructive self-heal when mismatch is the majority view.
+- Membership removals and `ETCD_INITIAL_CLUSTER` rewrites are gated by desired-state stability to reduce churn-induced drift.
 
 ## How It Works
 

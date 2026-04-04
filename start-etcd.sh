@@ -29,6 +29,16 @@ echo "  PEER_URLS=${PROTOCOL}://0.0.0.0:${ETCD_PEER_PORT}"
 echo "  INITIAL_ADVERTISE_PEER_URLS=${PROTOCOL}://${MY_IP}:${HOST_ETCD_PEER_PORT}"
 echo "  INITIAL_CLUSTER=${ETCD_INITIAL_CLUSTER}"
 
+EXPECTED_MEMBER_COUNT=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | grep -c '=')
+BOOTSTRAP_CANDIDATE_NAME=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | sed 's/=.*//' | sort | head -n1)
+ALLOW_NEW_CLUSTER_BOOTSTRAP=${ALLOW_NEW_CLUSTER_BOOTSTRAP:-false}
+ALLOW_ANY_NODE_BOOTSTRAP=${ALLOW_ANY_NODE_BOOTSTRAP:-false}
+
+echo "  EXPECTED_MEMBER_COUNT=${EXPECTED_MEMBER_COUNT}"
+echo "  BOOTSTRAP_CANDIDATE_NAME=${BOOTSTRAP_CANDIDATE_NAME}"
+echo "  ALLOW_NEW_CLUSTER_BOOTSTRAP=${ALLOW_NEW_CLUSTER_BOOTSTRAP}"
+echo "  ALLOW_ANY_NODE_BOOTSTRAP=${ALLOW_ANY_NODE_BOOTSTRAP}"
+
 # Extract other members' IPs from ETCD_INITIAL_CLUSTER
 OTHER_IPS=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | grep -v "$MY_NAME=" | sed 's/.*=.*:\/\///' | sed 's/:.*//')
 
@@ -88,6 +98,9 @@ try_join_existing_cluster() {
 # Function to verify this node's etcd is in the correct cluster
 verify_cluster_id() {
     local LOCAL_URL="${PROTOCOL}://127.0.0.1:${ETCD_CLIENT_PORT}"
+    local PEERS_REACHABLE=0
+    local PEERS_MATCHING=0
+    local PEERS_MISMATCHED=0
     echo "  Verifying cluster ID..."
 
     # Get our local cluster ID from member list output
@@ -97,7 +110,7 @@ verify_cluster_id() {
         return 1
     fi
 
-    # Try each peer and compare cluster IDs by cross-querying
+    # Evaluate all reachable peers and use majority to avoid false positives.
     for PEER_IP in $OTHER_IPS; do
         PEER_CLIENT_URL="${PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
 
@@ -107,19 +120,29 @@ verify_cluster_id() {
             continue
         fi
 
+        PEERS_REACHABLE=$((PEERS_REACHABLE + 1))
+
         # If peer is reachable, check if it knows about us
         if echo "$PEER_OUTPUT" | grep -q "$MY_NAME"; then
-            echo "  Peer $PEER_IP knows about us — same cluster"
-            return 0
+            echo "  Peer $PEER_IP knows about us"
+            PEERS_MATCHING=$((PEERS_MATCHING + 1))
         else
             echo "  Peer $PEER_IP does NOT know about us — cluster ID mismatch!"
-            return 2
+            PEERS_MISMATCHED=$((PEERS_MISMATCHED + 1))
         fi
     done
 
-    # No peers reachable to compare — can't verify
-    echo "  No peers reachable to verify cluster ID"
-    return 1
+    if [ "$PEERS_REACHABLE" -eq 0 ]; then
+        echo "  No peers reachable to verify cluster ID"
+        return 1
+    fi
+
+    echo "  Peer verification summary: reachable=${PEERS_REACHABLE}, matching=${PEERS_MATCHING}, mismatched=${PEERS_MISMATCHED}"
+    if [ "$PEERS_MISMATCHED" -gt "$PEERS_MATCHING" ]; then
+        return 2
+    fi
+
+    return 0
 }
 
 # Determine cluster state
@@ -202,8 +225,8 @@ if [ -z "$CLUSTER_STATE" ]; then
     echo "  No data directory — checking if an existing cluster is running..."
 
     # Retry peer discovery with backoff (peers may still be starting)
-    MAX_RETRIES=6
-    RETRY_DELAY=10
+    MAX_RETRIES=${ETCD_JOIN_MAX_RETRIES:-12}
+    RETRY_DELAY=${ETCD_JOIN_RETRY_DELAY_SECONDS:-10}
     for i in $(seq 1 $MAX_RETRIES); do
         echo "  Peer discovery attempt $i/$MAX_RETRIES..."
         if try_join_existing_cluster "${FORCE_REJOIN:-0}"; then
@@ -216,10 +239,34 @@ if [ -z "$CLUSTER_STATE" ]; then
         fi
     done
 
-    # If we never found an existing cluster, bootstrap as new
+    # If we never found an existing cluster, only bootstrap when explicitly allowed.
+    # This prevents accidental split clusters during network partitions/flapping.
     if [ -z "$CLUSTER_STATE" ]; then
-        CLUSTER_STATE=new
-        echo "  No existing cluster found after $MAX_RETRIES attempts — bootstrapping as new"
+        if [ "${FORCE_REJOIN:-0}" = "1" ]; then
+            echo "  Rejoin was forced after local data wipe, but no reachable peer was found. Refusing unsafe bootstrap."
+            exit 1
+        fi
+
+        if [ "$EXPECTED_MEMBER_COUNT" -le 1 ]; then
+            CLUSTER_STATE=new
+            echo "  Single-member configuration detected — bootstrapping as new"
+        else
+            if [ "$ALLOW_NEW_CLUSTER_BOOTSTRAP" != "true" ]; then
+                echo "  Multi-member cluster and no existing peer found."
+                echo "  Refusing automatic new cluster bootstrap to prevent split-brain."
+                echo "  Set ALLOW_NEW_CLUSTER_BOOTSTRAP=true on exactly one node for first-time bootstrap only."
+                exit 1
+            fi
+
+            if [ "$ALLOW_ANY_NODE_BOOTSTRAP" != "true" ] && [ "$MY_NAME" != "$BOOTSTRAP_CANDIDATE_NAME" ]; then
+                echo "  Bootstrap is restricted to deterministic candidate $BOOTSTRAP_CANDIDATE_NAME."
+                echo "  Current node $MY_NAME is not allowed to bootstrap a new multi-member cluster."
+                exit 1
+            fi
+
+            CLUSTER_STATE=new
+            echo "  Explicit bootstrap override enabled — bootstrapping new cluster"
+        fi
     fi
 fi
 
