@@ -45,10 +45,14 @@ fi
 UPDATE_INTERVAL_SECONDS=${UPDATE_INTERVAL_SECONDS:-300}
 DESIRED_STATE_STABILITY_CYCLES=${DESIRED_STATE_STABILITY_CYCLES:-3}
 STATE_TRACK_FILE=${STATE_TRACK_FILE:-/tmp/desired-state-tracker}
+ETCD_UNAVAILABLE_RECOVERY_CYCLES=${ETCD_UNAVAILABLE_RECOVERY_CYCLES:-2}
+ETCD_UNAVAILABLE_COUNT_FILE=${ETCD_UNAVAILABLE_COUNT_FILE:-/tmp/etcd-unavailable-count}
 
 echo "  UPDATE_INTERVAL_SECONDS: $UPDATE_INTERVAL_SECONDS"
 echo "  DESIRED_STATE_STABILITY_CYCLES: $DESIRED_STATE_STABILITY_CYCLES"
 echo "  STATE_TRACK_FILE: $STATE_TRACK_FILE"
+echo "  ETCD_UNAVAILABLE_RECOVERY_CYCLES: $ETCD_UNAVAILABLE_RECOVERY_CYCLES"
+echo "  ETCD_UNAVAILABLE_COUNT_FILE: $ETCD_UNAVAILABLE_COUNT_FILE"
 
 echo "================================================================================"
 echo "STARTING MONITORING LOOP"
@@ -292,11 +296,66 @@ while true; do
         echo "$(date): WARNING: Cannot connect to etcd at either endpoint"
         echo "Tried local: $LOCAL_ETCD_ENDPOINT"
         echo "Tried external: $EXTERNAL_ETCD_ENDPOINT"
+
+        UNAVAILABLE_COUNT=0
+        if [ -f "$ETCD_UNAVAILABLE_COUNT_FILE" ]; then
+            UNAVAILABLE_COUNT=$(cat "$ETCD_UNAVAILABLE_COUNT_FILE" 2>/dev/null || echo 0)
+        fi
+        UNAVAILABLE_COUNT=$((UNAVAILABLE_COUNT + 1))
+        echo "$UNAVAILABLE_COUNT" > "$ETCD_UNAVAILABLE_COUNT_FILE"
+        echo "$(date): etcd unavailable counter: $UNAVAILABLE_COUNT/$ETCD_UNAVAILABLE_RECOVERY_CYCLES"
+
+        # If local etcd is unavailable, use peer-side evidence to avoid being stuck forever.
+        # - If reachable peers do not know this node, local member state is stale/removed: wipe and rejoin.
+        # - If reachable peers know this node, try a non-destructive etcd restart first.
+        REACHABLE_PEERS=0
+        PEERS_KNOW_US=0
+        PEERS_DONT_KNOW_US=0
+        for DESIRED_IP in $DESIRED_IPS; do
+            if [ "$DESIRED_IP" = "$MY_IP" ]; then
+                continue
+            fi
+            PEER_ENDPOINT="${ETCD_PROTOCOL}://${DESIRED_IP}:${HOST_ETCD_CLIENT_PORT}"
+            PEER_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_ENDPOINT" --timeout=5s member list 2>/dev/null || true)
+            if [ -n "$PEER_MEMBERS" ]; then
+                REACHABLE_PEERS=$((REACHABLE_PEERS + 1))
+                if echo "$PEER_MEMBERS" | grep -q "$MY_NAME"; then
+                    PEERS_KNOW_US=$((PEERS_KNOW_US + 1))
+                else
+                    PEERS_DONT_KNOW_US=$((PEERS_DONT_KNOW_US + 1))
+                fi
+            fi
+        done
+
+        echo "$(date): peer evidence while local etcd is unavailable: reachable=$REACHABLE_PEERS know_us=$PEERS_KNOW_US dont_know_us=$PEERS_DONT_KNOW_US"
+
+        if [ "$UNAVAILABLE_COUNT" -ge "$ETCD_UNAVAILABLE_RECOVERY_CYCLES" ] && [ "$REACHABLE_PEERS" -gt 0 ]; then
+            if [ "$PEERS_DONT_KNOW_US" -gt "$PEERS_KNOW_US" ]; then
+                echo "$(date): Majority reachable peers do not know this node — wiping local etcd data and forcing rejoin"
+                rm -rf /var/lib/etcd/*
+                supervisorctl restart etcd 2>/dev/null || true
+                echo "0" > "$ETCD_UNAVAILABLE_COUNT_FILE"
+                sleep 60
+                continue
+            fi
+
+            if [ "$PEERS_KNOW_US" -gt 0 ]; then
+                echo "$(date): Reachable peers know this node but local etcd is down — restarting etcd"
+                supervisorctl restart etcd 2>/dev/null || true
+                echo "0" > "$ETCD_UNAVAILABLE_COUNT_FILE"
+                sleep 30
+                continue
+            fi
+        fi
+
         echo "This might be normal if etcd is still starting up"
         echo "Sleeping for $UPDATE_INTERVAL_SECONDS seconds..."
         sleep "$UPDATE_INTERVAL_SECONDS"
         continue
     fi
+
+    # Clear temporary unavailable counter once etcd is healthy again.
+    echo "0" > "$ETCD_UNAVAILABLE_COUNT_FILE"
 
     if [ -n "$CURRENT_MEMBERS" ]; then
         echo "$(date): Processing cluster member differences..."

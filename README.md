@@ -106,6 +106,8 @@ Key Points:
 | `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
 | `UPDATE_INTERVAL_SECONDS` | Update daemon reconciliation interval | `300` |
 | `DESIRED_STATE_STABILITY_CYCLES` | API desired-state cycles required before membership removal/rewrite | `3` |
+| `ETCD_UNAVAILABLE_RECOVERY_CYCLES` | Consecutive updater cycles with local etcd unavailable before peer-evidence recovery kicks in | `2` |
+| `ETCD_UNAVAILABLE_COUNT_FILE` | Internal counter file used by updater for unavailable-etcd recovery state | `/tmp/etcd-unavailable-count` |
 
 ### Split-Brain Prevention Controls
 
