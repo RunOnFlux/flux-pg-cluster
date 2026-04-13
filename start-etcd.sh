@@ -47,8 +47,13 @@ OTHER_IPS=$(echo "$ETCD_INITIAL_CLUSTER" | tr ',' '\n' | grep -v "$MY_NAME=" | s
 # Function to check if a peer cluster is reachable and attempt to join it
 # Pass FORCE_REJOIN=1 when local data was wiped — forces member remove+add instead of
 # treating an existing registration as a normal restart (which would panic on empty raft log).
+# Return codes:
+#   0 = successfully joined
+#   1 = no peers reachable (safe to bootstrap new if truly a fresh cluster)
+#   2 = peers reachable but join failed (unsafe to bootstrap — would cause split-brain)
 try_join_existing_cluster() {
     local FORCE_REJOIN="${1:-0}"
+    local ANY_PEER_REACHABLE=0
 
     for PEER_IP in $OTHER_IPS; do
         PEER_CLIENT_URL="${PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
@@ -56,6 +61,7 @@ try_join_existing_cluster() {
 
         if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" --timeout=5s member list >/dev/null 2>&1; then
             echo "  Found existing cluster via $PEER_IP"
+            ANY_PEER_REACHABLE=1
 
             # Check if this node is already a member
             EXISTING_MEMBER=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member list 2>/dev/null | grep "$MY_NAME" || true)
@@ -94,6 +100,11 @@ try_join_existing_cluster() {
             echo "  Peer $PEER_IP not reachable"
         fi
     done
+
+    # Peers were reachable but we couldn't complete the join — signal split-brain risk
+    if [ "$ANY_PEER_REACHABLE" -eq 1 ]; then
+        return 2
+    fi
     return 1
 }
 
@@ -229,14 +240,23 @@ if [ -z "$CLUSTER_STATE" ]; then
     # Retry peer discovery with backoff (peers may still be starting)
     MAX_RETRIES=${ETCD_JOIN_MAX_RETRIES:-12}
     RETRY_DELAY=${ETCD_JOIN_RETRY_DELAY_SECONDS:-10}
+    PEERS_WERE_REACHABLE=0
     for i in $(seq 1 $MAX_RETRIES); do
         echo "  Peer discovery attempt $i/$MAX_RETRIES..."
-        if try_join_existing_cluster "${FORCE_REJOIN:-0}"; then
+        set +e
+        try_join_existing_cluster "${FORCE_REJOIN:-0}"
+        JOIN_RESULT=$?
+        set -e
+        if [ $JOIN_RESULT -eq 0 ]; then
             break
+        fi
+        if [ $JOIN_RESULT -eq 2 ]; then
+            PEERS_WERE_REACHABLE=1
+            echo "  Peers reachable but join failed — existing cluster detected; will not bootstrap new"
         fi
 
         if [ $i -lt $MAX_RETRIES ]; then
-            echo "  No peers reachable, waiting ${RETRY_DELAY}s before retry..."
+            echo "  Retrying in ${RETRY_DELAY}s..."
             sleep $RETRY_DELAY
         fi
     done
@@ -246,6 +266,15 @@ if [ -z "$CLUSTER_STATE" ]; then
     if [ -z "$CLUSTER_STATE" ]; then
         if [ "${FORCE_REJOIN:-0}" = "1" ]; then
             echo "  Rejoin was forced after local data wipe, but no reachable peer was found. Refusing unsafe bootstrap."
+            exit 1
+        fi
+
+        # If peers were reachable at any point but join failed, there IS an existing cluster.
+        # Bootstrapping a new cluster here would create split-brain with a different cluster ID.
+        # Exit and let supervisord restart so we retry joining.
+        if [ "$PEERS_WERE_REACHABLE" -eq 1 ]; then
+            echo "  SPLIT-BRAIN GUARD: peers were reachable but join failed — existing cluster detected."
+            echo "  Refusing new cluster bootstrap. Supervisord will restart and retry joining."
             exit 1
         fi
 

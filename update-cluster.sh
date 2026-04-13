@@ -144,6 +144,31 @@ while true; do
         echo "$RAW_MEMBER_LIST"
 
         # ================================================================
+        # ETCD SPLIT-BRAIN (ISOLATED CLUSTER) DETECTION
+        # If local etcd shows only 1 member but Flux API reports multiple
+        # nodes, local etcd bootstrapped a solo cluster (split-brain).
+        # Restart etcd to trigger verify_cluster_id, which detects the
+        # mismatch, wipes the bad data, and rejoins the correct cluster.
+        # ================================================================
+        LOCAL_MEMBER_COUNT=$(echo "$RAW_MEMBER_LIST" | grep -c "name=" || echo 0)
+        DESIRED_NODE_COUNT=$(echo "$DESIRED_IPS" | grep -c "." || echo 0)
+        if [ "$LOCAL_MEMBER_COUNT" -le 1 ] && [ "$DESIRED_NODE_COUNT" -gt 1 ]; then
+            echo "$(date): Local etcd shows $LOCAL_MEMBER_COUNT member(s) but $DESIRED_NODE_COUNT nodes expected"
+            for PEER_IP in $(echo "$DESIRED_IPS" | grep -v "^${MY_IP}$"); do
+                PEER_ENDPOINT="${ETCD_PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
+                PEER_MEMBER_COUNT=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_ENDPOINT" --timeout=5s member list 2>/dev/null | grep -c "name=" || echo 0)
+                if [ "$PEER_MEMBER_COUNT" -gt "$LOCAL_MEMBER_COUNT" ]; then
+                    echo "$(date): SPLIT-BRAIN DETECTED — peer $PEER_IP has $PEER_MEMBER_COUNT members, local has $LOCAL_MEMBER_COUNT"
+                    echo "$(date): Restarting etcd to trigger cluster ID mismatch self-heal..."
+                    supervisorctl stop etcd 2>/dev/null || true
+                    sleep 2
+                    supervisorctl start etcd 2>/dev/null || true
+                    break
+                fi
+            done
+        fi
+
+        # ================================================================
         # GHOST MEMBER CLEANUP
         # Remove members that never fully started — they appear as either:
         #   "id[unstarted]: peerURLs=..." (no clientURLs at all)
