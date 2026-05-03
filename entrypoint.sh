@@ -334,7 +334,7 @@ sed -e "s/__MY_NAME__/$MY_NAME/g" \
 
 echo "Generated Patroni configuration:"
 echo "--- START patroni.yml ---"
-cat /etc/patroni/patroni.yml
+sed -E 's/(password:\s*).+/\1[REDACTED]/g' /etc/patroni/patroni.yml
 echo "--- END patroni.yml ---"
 
 # Create cluster environment file for supervisord
@@ -394,7 +394,7 @@ echo "CLUSTER ENVIRONMENT FILE"
 echo "================================================================================"
 echo "Generated cluster environment file for supervisord:"
 echo "--- START /etc/cluster_env ---"
-cat /etc/cluster_env
+sed -E 's/(PASSWORD=).+/\1[REDACTED]/g' /etc/cluster_env
 echo "--- END /etc/cluster_env ---"
 
 echo "================================================================================"
