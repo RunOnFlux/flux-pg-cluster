@@ -108,6 +108,8 @@ Key Points:
 | `DESIRED_STATE_STABILITY_CYCLES` | API desired-state cycles required before membership removal/rewrite | `3` |
 | `ETCD_UNAVAILABLE_RECOVERY_CYCLES` | Consecutive updater cycles with local etcd unavailable before peer-evidence recovery kicks in | `2` |
 | `ETCD_UNAVAILABLE_COUNT_FILE` | Internal counter file used by updater for unavailable-etcd recovery state | `/tmp/etcd-unavailable-count` |
+| `PATRONI_SYNCHRONOUS_MODE` | Enable synchronous replication — every commit waits for at least one replica to acknowledge before returning success. Eliminates data loss on failover but increases write latency and risks write-stall if all replicas go offline. See note below. | `false` |
+| `PATRONI_MINIMUM_SYNCHRONOUS_REPLICAS` | Minimum number of replicas that must acknowledge a commit when `PATRONI_SYNCHRONOUS_MODE=true`. Has no effect when synchronous mode is disabled. | `1` |
 
 ### Split-Brain Prevention Controls
 
@@ -115,6 +117,25 @@ Key Points:
 - By default, only one deterministic bootstrap candidate (lowest node name) may bootstrap a new cluster.
 - Mismatch detection evaluates all reachable peers and only performs destructive self-heal when mismatch is the majority view.
 - Membership removals and `ETCD_INITIAL_CLUSTER` rewrites are gated by desired-state stability to reduce churn-induced drift.
+
+### Synchronous Replication
+
+By default the cluster uses **asynchronous replication** — the primary commits writes without waiting for replicas. This maximises availability on Flux where nodes can be geographically distributed or intermittently unreachable.
+
+Set `PATRONI_SYNCHRONOUS_MODE=true` to switch to **synchronous quorum replication**:
+
+```json
+"PATRONI_SYNCHRONOUS_MODE=true",
+"PATRONI_MINIMUM_SYNCHRONOUS_REPLICAS=1"
+```
+
+| | Async (default) | Synchronous |
+|---|---|---|
+| **Write latency** | Low | Higher (one replica round-trip per commit) |
+| **Data loss on failover** | Possible (last WAL records) | None |
+| **Availability if replicas down** | Primary keeps writing | Primary **pauses writes** until a replica reconnects |
+
+> **Warning**: With `PATRONI_SYNCHRONOUS_MODE=true`, if the number of available replicas drops below `PATRONI_MINIMUM_SYNCHRONOUS_REPLICAS`, the primary will stop accepting writes until a replica comes back online. Only enable this if your workload can tolerate that trade-off.
 
 ## How It Works
 

@@ -29,7 +29,8 @@ bootstrap:
     retry_timeout: 30
     maximum_lag_on_failover: 1048576
     master_start_timeout: 300
-    synchronous_mode: false
+    synchronous_mode: __SYNCHRONOUS_MODE__
+    minimum_synchronous_replicas: __MINIMUM_SYNCHRONOUS_REPLICAS__
     postgresql:
       use_pg_rewind: true
       use_slots: true
