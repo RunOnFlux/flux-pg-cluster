@@ -238,7 +238,7 @@ For local development and testing, this repository includes a complete mock envi
 
 1. **Start local test cluster**:
    ```bash
-   docker-compose up -d --build
+   docker compose up -d --build
    ```
 
 2. **Access local services**:
@@ -259,9 +259,45 @@ For local development and testing, this repository includes a complete mock envi
 
 The local setup includes:
 - **3-node PostgreSQL cluster** with automatic failover
-- **Mock Flux API server** (nginx serving JSON files)
+- **Mock Flux API server** (FastAPI with dynamic admin control endpoints)
 - **Isolated Docker network** simulating real deployment
 - **All services** running on separate ports for testing
+
+### Integration Test Suite
+
+A pytest-based integration test suite is included under `tests/` for verifying cluster behaviour under failure scenarios.
+
+**Install dependencies**:
+```bash
+pip install -r requirements-test.txt
+```
+
+**Run tests** (uses `docker-compose.test.yml` with fast timing overrides):
+```bash
+# All scenarios
+pytest tests/ -v
+
+# Individual scenarios
+pytest tests/scenarios/test_normal_failover.py -v
+pytest tests/scenarios/test_ec1_unreachable_node.py -v
+pytest tests/scenarios/test_ec2_late_api_registration.py -v
+pytest tests/scenarios/test_ec3_majority_replacement.py -v
+```
+
+The test suite automatically builds images, starts a fresh cluster per module, and tears it down after. The `docker-compose.test.yml` override shortens all timeouts for faster test runs:
+
+| Override | Test value | Purpose |
+|---|---|---|
+| `UPDATE_INTERVAL_SECONDS` | `15` | Faster updater loop |
+| `DESIRED_STATE_STABILITY_CYCLES` | `2` | 30s stability window |
+| `PATRONI_TTL` | `15` | Faster leader failover |
+| `PATRONI_LOOP_WAIT` | `5` | Faster Patroni loop |
+
+The mock Flux API (`mock-api/server.py`) exposes admin endpoints for injecting failures mid-test:
+- `POST /admin/set-nodes` — update the node list the cluster sees
+- `POST /admin/set-delay` — simulate API latency
+- `POST /admin/set-error` — inject API errors
+- `POST /admin/reset` — restore initial state
 
 
 ### Logs

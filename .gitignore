@@ -1,7 +1,7 @@
-CLAUDE.md
-.claude
 test/
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+*.md
+!README.md
