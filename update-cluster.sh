@@ -34,10 +34,12 @@ echo "  SSL_ENABLED: $SSL_ENABLED"
 # Configure etcdctl SSL parameters and protocol if SSL is enabled
 if [ "$SSL_ENABLED" = "true" ]; then
     ETCDCTL_SSL_OPTS="--cert-file=/etc/ssl/cluster/etcd/client.crt --key-file=/etc/ssl/cluster/etcd/client.key --ca-file=/etc/ssl/cluster/ca/ca.crt"
+    ETCD_CURL_SSL_OPTS="--cacert /etc/ssl/cluster/ca/ca.crt --cert /etc/ssl/cluster/etcd/client.crt --key /etc/ssl/cluster/etcd/client.key"
     ETCD_PROTOCOL="https"
     echo "  ETCD SSL: Enabled (using client certificates)"
 else
     ETCDCTL_SSL_OPTS=""
+    ETCD_CURL_SSL_OPTS=""
     ETCD_PROTOCOL="http"
     echo "  ETCD SSL: Disabled"
 fi
@@ -47,6 +49,8 @@ DESIRED_STATE_STABILITY_CYCLES=${DESIRED_STATE_STABILITY_CYCLES:-3}
 STATE_TRACK_FILE=${STATE_TRACK_FILE:-/tmp/desired-state-tracker}
 ETCD_UNAVAILABLE_RECOVERY_CYCLES=${ETCD_UNAVAILABLE_RECOVERY_CYCLES:-2}
 ETCD_UNAVAILABLE_COUNT_FILE=${ETCD_UNAVAILABLE_COUNT_FILE:-/tmp/etcd-unavailable-count}
+# Tracks consecutive cycles where etcd has no quorum — used for force-new-cluster recovery
+ETCD_NO_QUORUM_COUNT_FILE=${ETCD_NO_QUORUM_COUNT_FILE:-/tmp/etcd-no-quorum-count}
 
 echo "  UPDATE_INTERVAL_SECONDS: $UPDATE_INTERVAL_SECONDS"
 echo "  DESIRED_STATE_STABILITY_CYCLES: $DESIRED_STATE_STABILITY_CYCLES"
@@ -137,6 +141,25 @@ while true; do
 
     if [ -n "$ETCD_ENDPOINT" ]; then
         echo "Using etcd endpoint: $ETCD_ENDPOINT"
+
+        # ================================================================
+        # ETCD QUORUM HEALTH CHECK
+        # Track consecutive cycles where etcd reports no quorum.
+        # Used later to trigger --force-new-cluster recovery when the
+        # surviving node can't regain quorum after majority replacement.
+        # ================================================================
+        ETCD_HEALTH_RESPONSE=$(curl -sf $ETCD_CURL_SSL_OPTS "${ETCD_ENDPOINT%:*}:${HOST_ETCD_CLIENT_PORT}/health" 2>/dev/null || echo '{"health":"false"}')
+        ETCD_HEALTH=$(echo "$ETCD_HEALTH_RESPONSE" | grep -o '"health":"[^"]*"' | cut -d'"' -f4 || echo "false")
+        echo "$(date): etcd health: $ETCD_HEALTH"
+
+        NO_QUORUM_COUNT=$(cat "$ETCD_NO_QUORUM_COUNT_FILE" 2>/dev/null || echo 0)
+        if [ "$ETCD_HEALTH" != "true" ]; then
+            NO_QUORUM_COUNT=$((NO_QUORUM_COUNT + 1))
+            echo "$NO_QUORUM_COUNT" > "$ETCD_NO_QUORUM_COUNT_FILE"
+            echo "$(date): etcd no-quorum count: $NO_QUORUM_COUNT/$DESIRED_STATE_STABILITY_CYCLES"
+        else
+            echo "0" > "$ETCD_NO_QUORUM_COUNT_FILE"
+        fi
 
         # Get raw member list
         RAW_MEMBER_LIST=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>/dev/null || true)
@@ -419,6 +442,49 @@ while true; do
         echo "  Members to keep: $(echo "$CURRENT_MEMBERS" | wc -l) - $(echo "$DESIRED_IPS" | wc -l) = $(echo "$MEMBERS_TO_REMOVE" | wc -w) will be removed"
         echo "  New members expected: $(echo "$NEW_MEMBERS" | wc -w)"
 
+        # ================================================================
+        # FORCE-NEW-CLUSTER QUORUM RECOVERY
+        # When the majority of nodes are simultaneously replaced (e.g. 2/3
+        # nodes swapped at once), the surviving node loses etcd quorum.
+        # etcd requires quorum for member add/remove, so new nodes can
+        # never join and the cluster is permanently deadlocked.
+        #
+        # Recovery: if this node has been the surviving member for
+        # DESIRED_STATE_STABILITY_CYCLES without quorum, AND the stale
+        # members have been absent from the Flux API long enough, write
+        # the force-new-cluster flag and restart etcd so it forms a
+        # single-member cluster. New nodes can then join normally.
+        #
+        # Safety gate: only trigger if PostgreSQL data exists locally
+        # (avoids bootstrapping an empty node as primary).
+        # ================================================================
+        NO_QUORUM_COUNT=$(cat "$ETCD_NO_QUORUM_COUNT_FILE" 2>/dev/null || echo 0)
+        if [ "$ETCD_HEALTH" != "true" ] && \
+           [ "$NO_QUORUM_COUNT" -ge "$DESIRED_STATE_STABILITY_CYCLES" ] && \
+           [ -n "$MEMBERS_TO_REMOVE" ] && \
+           [ -d "/var/lib/postgresql/data/global" ]; then
+            echo "$(date): QUORUM RECOVERY TRIGGERED"
+            echo "$(date):   No quorum for $NO_QUORUM_COUNT consecutive cycles (threshold: $DESIRED_STATE_STABILITY_CYCLES)"
+            echo "$(date):   Stale members pending removal: $MEMBERS_TO_REMOVE"
+            echo "$(date):   Writing --force-new-cluster flag and restarting etcd..."
+            touch /tmp/force-new-cluster
+            echo "0" > "$ETCD_NO_QUORUM_COUNT_FILE"
+            supervisorctl stop patroni 2>/dev/null || true
+            supervisorctl restart etcd 2>/dev/null || true
+            # Wait for etcd to come up as a single-member cluster
+            for _i in $(seq 1 30); do
+                sleep 2
+                if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$LOCAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
+                    echo "$(date): etcd is up after force-new-cluster restart"
+                    break
+                fi
+            done
+            supervisorctl start patroni 2>/dev/null || true
+            echo "$(date): Quorum recovery complete — new nodes can now join"
+            sleep "$UPDATE_INTERVAL_SECONDS"
+            continue
+        fi
+
         # Process removals
         for CURRENT_IP in $MEMBERS_TO_REMOVE; do
             if [ -n "$CURRENT_IP" ]; then
@@ -467,6 +533,19 @@ while true; do
         sed -i "s|^ETCD_INITIAL_CLUSTER=.*|ETCD_INITIAL_CLUSTER=$NEW_ETCD_INITIAL_CLUSTER|" /etc/cluster_env
         sed -i "s|^ETCD_HOSTS=.*|ETCD_HOSTS=$NEW_ETCD_HOSTS|" /etc/cluster_env
         echo "Updated ETCD_INITIAL_CLUSTER to: $NEW_ETCD_INITIAL_CLUSTER"
+
+        # Keep patroni.yml in sync so that if Patroni restarts it connects
+        # to the correct etcd members rather than stale addresses.
+        if [ -f /etc/patroni/patroni.yml ]; then
+            sed -i "s|^  hosts:.*|  hosts: $NEW_ETCD_HOSTS|" /etc/patroni/patroni.yml
+            echo "$(date): Updated patroni.yml etcd hosts to: $NEW_ETCD_HOSTS"
+            # Signal Patroni to reload its config without a full restart
+            PATRONI_PID=$(pgrep -f "patroni" | head -n1 || true)
+            if [ -n "$PATRONI_PID" ]; then
+                kill -HUP "$PATRONI_PID" 2>/dev/null || true
+                echo "$(date): Sent SIGHUP to Patroni (PID $PATRONI_PID)"
+            fi
+        fi
 
     else
         echo "$(date): No current etcd members found or connection failed"

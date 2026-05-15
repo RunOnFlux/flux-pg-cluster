@@ -108,6 +108,13 @@ Key Points:
 | `DESIRED_STATE_STABILITY_CYCLES` | API desired-state cycles required before membership removal/rewrite | `3` |
 | `ETCD_UNAVAILABLE_RECOVERY_CYCLES` | Consecutive updater cycles with local etcd unavailable before peer-evidence recovery kicks in | `2` |
 | `ETCD_UNAVAILABLE_COUNT_FILE` | Internal counter file used by updater for unavailable-etcd recovery state | `/tmp/etcd-unavailable-count` |
+| `PATRONI_TTL` | Patroni DCS TTL (seconds) — how long a leader key is valid before another node may start an election | `30` |
+| `PATRONI_LOOP_WAIT` | Patroni main loop interval (seconds) | `10` |
+| `PATRONI_RETRY_TIMEOUT` | Patroni DCS operation retry timeout (seconds) | `30` |
+| `PATRONI_MAX_LAG` | Maximum replication lag (bytes) a replica may have and still be eligible for leader election. Default 32 MB is generous enough to tolerate WAN jitter without excluding healthy replicas. | `33554432` |
+| `PATRONI_MASTER_START_TIMEOUT` | Seconds Patroni waits for the primary to start before considering a failover | `300` |
+| `PATRONI_MASTER_STOP_TIMEOUT` | Seconds Patroni waits for the primary to stop cleanly before forcibly terminating it | `300` |
+| `PATRONI_USE_SLOTS` | Whether to use PostgreSQL replication slots. Disabled by default to prevent WAL accumulation when replicas disappear in high-churn Flux deployments. | `false` |
 | `PATRONI_SYNCHRONOUS_MODE` | Enable synchronous replication — every commit waits for at least one replica to acknowledge before returning success. Eliminates data loss on failover but increases write latency and risks write-stall if all replicas go offline. See note below. | `false` |
 | `PATRONI_SYNCHRONOUS_MODE_STRICT` | When `true`, the primary **blocks all writes** if no synchronous replica is available instead of silently falling back to async. Only meaningful when `PATRONI_SYNCHRONOUS_MODE=true`. | `false` |
 | `PATRONI_SYNCHRONOUS_NODE_COUNT` | Number of synchronous replicas required to acknowledge a commit when `PATRONI_SYNCHRONOUS_MODE=true`. Maps to Patroni's `synchronous_node_count`. Has no effect when synchronous mode is disabled. | `1` |

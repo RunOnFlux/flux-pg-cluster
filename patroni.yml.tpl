@@ -24,17 +24,18 @@ etcd:
 bootstrap:
   method: initdb
   dcs:
-    ttl: 30
-    loop_wait: 10
-    retry_timeout: 30
-    maximum_lag_on_failover: 1048576
-    master_start_timeout: 300
+    ttl: __PATRONI_TTL__
+    loop_wait: __PATRONI_LOOP_WAIT__
+    retry_timeout: __PATRONI_RETRY_TIMEOUT__
+    maximum_lag_on_failover: __PATRONI_MAX_LAG__
+    master_start_timeout: __PATRONI_MASTER_START_TIMEOUT__
+    master_stop_timeout: __PATRONI_MASTER_STOP_TIMEOUT__
     synchronous_mode: __SYNCHRONOUS_MODE__
     synchronous_mode_strict: __SYNCHRONOUS_MODE_STRICT__
     synchronous_node_count: __SYNCHRONOUS_NODE_COUNT__
     postgresql:
       use_pg_rewind: true
-      use_slots: true
+      use_slots: __PATRONI_USE_SLOTS__
       parameters:
         max_connections: 200
         shared_buffers: 256MB

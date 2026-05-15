@@ -1,5 +1,24 @@
 #!/bin/bash
 
+# Source cluster environment to detect SSL settings and ports
+source /etc/cluster_env 2>/dev/null || true
+
+# Build SSL-aware curl flags for etcd and Patroni
+if [ "$SSL_ENABLED" = "true" ]; then
+    ETCD_CURL_OPTS="--cacert /etc/ssl/cluster/ca/ca.crt --cert /etc/ssl/cluster/etcd/client.crt --key /etc/ssl/cluster/etcd/client.key"
+    PATRONI_CURL_OPTS="-k"
+    ETCD_SCHEME="https"
+    PATRONI_SCHEME="https"
+else
+    ETCD_CURL_OPTS=""
+    PATRONI_CURL_OPTS=""
+    ETCD_SCHEME="http"
+    PATRONI_SCHEME="http"
+fi
+
+ETCD_PORT=${HOST_ETCD_CLIENT_PORT:-2379}
+PATRONI_PORT=${HOST_PATRONI_API_PORT:-8008}
+
 echo "================================================================================"
 echo "PATRONI CLUSTER DIAGNOSTICS"
 echo "================================================================================"
@@ -27,7 +46,7 @@ echo ""
 
 echo "4. ETCD STATUS:"
 echo "etcd connection test:"
-curl -s localhost:2379/health && echo "etcd OK" || echo "etcd FAILED"
+curl -sf $ETCD_CURL_OPTS "${ETCD_SCHEME}://localhost:${ETCD_PORT}/health" && echo "etcd OK" || echo "etcd FAILED"
 echo ""
 
 echo "5. PATRONI STATUS:"
@@ -35,8 +54,8 @@ echo "Patroni process check:"
 pgrep -f "patroni" >/dev/null && echo "Patroni process is running" || echo "Patroni process NOT running"
 echo ""
 
-echo "Patroni REST API detailed test (port 8008):"
-PATRONI_RESPONSE=$(curl -s -w "HTTP_CODE:%{http_code}" localhost:8008/ 2>/dev/null)
+echo "Patroni REST API detailed test (port ${PATRONI_PORT}):"
+PATRONI_RESPONSE=$(curl -s $PATRONI_CURL_OPTS -w "HTTP_CODE:%{http_code}" "${PATRONI_SCHEME}://localhost:${PATRONI_PORT}/" 2>/dev/null)
 if [[ "$PATRONI_RESPONSE" == *"HTTP_CODE:200"* ]]; then
     echo "Patroni API OK - Response: ${PATRONI_RESPONSE%HTTP_CODE:*}"
 elif [[ "$PATRONI_RESPONSE" == *"HTTP_CODE:"* ]]; then
@@ -47,7 +66,7 @@ fi
 echo ""
 
 echo "Testing direct port connectivity:"
-timeout 3 bash -c 'cat < /dev/null > /dev/tcp/localhost/8008' 2>/dev/null && echo "Port 8008 is open" || echo "Port 8008 is not accessible"
+timeout 3 bash -c "cat < /dev/null > /dev/tcp/localhost/${PATRONI_PORT}" 2>/dev/null && echo "Port ${PATRONI_PORT} is open" || echo "Port ${PATRONI_PORT} is not accessible"
 echo ""
 
 echo "Patroni configuration check:"
@@ -56,7 +75,7 @@ grep -A 5 "restapi:" /etc/patroni/patroni.yml 2>/dev/null || echo "Cannot read p
 echo ""
 
 echo "Patroni cluster status (if API works):"
-curl -s localhost:8008/cluster | jq '.' 2>/dev/null || echo "Patroni cluster API call failed"
+curl -s $PATRONI_CURL_OPTS "${PATRONI_SCHEME}://localhost:${PATRONI_PORT}/cluster" | jq '.' 2>/dev/null || echo "Patroni cluster API call failed"
 echo ""
 
 echo "6. PATRONI CLUSTER LIST:"

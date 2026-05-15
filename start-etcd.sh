@@ -13,7 +13,7 @@ echo "  SSL_ENABLED=$SSL_ENABLED"
 # Determine protocol and SSL params
 if [ "$SSL_ENABLED" = "true" ]; then
     PROTOCOL=https
-    SSL_PARAMS="--cert-file=/etc/ssl/cluster/etcd/client.crt --key-file=/etc/ssl/cluster/etcd/client.key --trusted-ca-file=/etc/ssl/cluster/ca/ca.crt --client-cert-auth --peer-auto-tls"
+    SSL_PARAMS="--cert-file=/etc/ssl/cluster/etcd/client.crt --key-file=/etc/ssl/cluster/etcd/client.key --trusted-ca-file=/etc/ssl/cluster/ca/ca.crt --client-cert-auth --peer-cert-file=/etc/ssl/cluster/etcd/peer.crt --peer-key-file=/etc/ssl/cluster/etcd/peer.key --peer-trusted-ca-file=/etc/ssl/cluster/ca/ca.crt --peer-client-cert-auth"
     ETCDCTL_SSL_OPTS="--cert-file=/etc/ssl/cluster/etcd/client.crt --key-file=/etc/ssl/cluster/etcd/client.key --ca-file=/etc/ssl/cluster/ca/ca.crt"
     echo "  SSL: Enabled"
 else
@@ -336,6 +336,16 @@ fi
 
 echo "  CLUSTER_STATE=$CLUSTER_STATE"
 echo "  SSL_PARAMS=$SSL_PARAMS"
+
+# Check for force-new-cluster flag written by update-cluster.sh quorum recovery
+FORCE_NEW_CLUSTER_FLAG=/tmp/force-new-cluster
+FORCE_NEW_CLUSTER_ARG=""
+if [ -f "$FORCE_NEW_CLUSTER_FLAG" ]; then
+    echo "$(date): Force-new-cluster flag detected — starting etcd with --force-new-cluster"
+    rm -f "$FORCE_NEW_CLUSTER_FLAG"
+    FORCE_NEW_CLUSTER_ARG="--force-new-cluster"
+fi
+
 echo "Starting etcd..."
 
 exec etcd \
@@ -348,4 +358,5 @@ exec etcd \
     --initial-cluster-state="$CLUSTER_STATE" \
     --initial-cluster-token=postgres-cluster-token \
     --data-dir=/var/lib/etcd \
+    $FORCE_NEW_CLUSTER_ARG \
     $SSL_PARAMS
