@@ -109,7 +109,7 @@ Key Points:
 | `ETCD_UNAVAILABLE_RECOVERY_CYCLES` | Consecutive updater cycles with local etcd unavailable before peer-evidence recovery kicks in | `2` |
 | `ETCD_UNAVAILABLE_COUNT_FILE` | Internal counter file used by updater for unavailable-etcd recovery state | `/tmp/etcd-unavailable-count` |
 | `PATRONI_SYNCHRONOUS_MODE` | Enable synchronous replication — every commit waits for at least one replica to acknowledge before returning success. Eliminates data loss on failover but increases write latency and risks write-stall if all replicas go offline. See note below. | `false` |
-| `PATRONI_MINIMUM_SYNCHRONOUS_REPLICAS` | Minimum number of replicas that must acknowledge a commit when `PATRONI_SYNCHRONOUS_MODE=true`. Has no effect when synchronous mode is disabled. | `1` |
+| `PATRONI_SYNCHRONOUS_NODE_COUNT` | Number of synchronous replicas required to acknowledge a commit when `PATRONI_SYNCHRONOUS_MODE=true`. Maps to Patroni's `synchronous_node_count`. Has no effect when synchronous mode is disabled. | `1` |
 
 ### Split-Brain Prevention Controls
 
@@ -126,7 +126,7 @@ Set `PATRONI_SYNCHRONOUS_MODE=true` to switch to **synchronous quorum replicatio
 
 ```json
 "PATRONI_SYNCHRONOUS_MODE=true",
-"PATRONI_MINIMUM_SYNCHRONOUS_REPLICAS=1"
+"PATRONI_SYNCHRONOUS_NODE_COUNT=1"
 ```
 
 | | Async (default) | Synchronous |
