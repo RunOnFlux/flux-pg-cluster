@@ -30,6 +30,7 @@ bootstrap:
     maximum_lag_on_failover: 1048576
     master_start_timeout: 300
     synchronous_mode: __SYNCHRONOUS_MODE__
+    synchronous_mode_strict: __SYNCHRONOUS_MODE_STRICT__
     synchronous_node_count: __SYNCHRONOUS_NODE_COUNT__
     postgresql:
       use_pg_rewind: true
