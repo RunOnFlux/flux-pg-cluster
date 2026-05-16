@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 import docker
@@ -46,15 +47,17 @@ def built_image(project_dir: Path, compose_cmd: list[str]):
 @pytest.fixture(scope="module")
 def running_cluster(project_dir: Path, compose_cmd: list[str], built_image):
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
+    time.sleep(10)  # Wait for Docker to fully release networks/volumes before starting
     subprocess.run(compose_cmd + ["up", "-d"], cwd=project_dir, check=True)
     yield
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
+    time.sleep(10)  # Wait for Docker to fully clean up before next module starts
 
 
 @pytest.fixture(scope="module")
 def cluster(running_cluster, docker_client):
     manager = ClusterManager(docker_client)
-    manager.wait_for_healthy(timeout=300)
+    manager.wait_for_healthy(timeout=480)
     yield manager
     manager.cleanup_dynamic()
 

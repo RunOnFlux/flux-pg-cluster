@@ -33,6 +33,9 @@ EXTRA_NODES = {
 NETWORK_NAME = "flux-pg-cluster_cluster_network"
 
 
+HEALTHY_STATES = {"running", "streaming", "in archive recovery"}
+
+
 class ClusterManager:
     def __init__(self, docker_client: docker.DockerClient) -> None:
         self.docker_client = docker_client
@@ -95,14 +98,14 @@ class ClusterManager:
     def get_running_members(self) -> list[str]:
         status = self.cluster_status()
         members = status.get("members", []) if status else []
-        running = [member.get("name") for member in members if member.get("state") == "running"]
+        running = [member.get("name") for member in members if member.get("state") in HEALTHY_STATES]
         if running:
             return [name for name in running if name]
 
         fallback = []
         for node_name in self._all_node_names():
             member_status = self.patroni_status(node_name)
-            if member_status and member_status.get("state") == "running":
+            if member_status and member_status.get("state") in HEALTHY_STATES:
                 fallback.append(member_status.get("name"))
         return [name for name in fallback if name]
 
@@ -110,11 +113,40 @@ class ClusterManager:
         deadline = time.time() + timeout
         last_status = None
         while time.time() < deadline:
+            # Use a single cluster_status call per iteration so leader and member
+            # data come from the same consistent snapshot (avoids false-positives
+            # from concurrent API calls to different nodes in a transitioning cluster).
             last_status = self.cluster_status()
-            leader = self.get_leader()
-            running_members = self.get_running_members()
-            if leader and len(set(running_members)) >= expected_members:
-                return True
+            if last_status:
+                members = last_status.get("members", [])
+                leader_name = next(
+                    (m.get("name") for m in members if m.get("role") in {"leader", "master", "primary"}),
+                    None,
+                )
+                running = [m.get("name") for m in members if m.get("state") in HEALTHY_STATES]
+                if leader_name and len(set(running)) >= expected_members:
+                    # Verify the leader is actually reachable via SQL before
+                    # declaring the cluster healthy. Patroni serves stale DCS
+                    # data when etcd has no quorum (dead members may appear
+                    # "running" in the cached view for 90+ seconds). Without
+                    # this check, exec_sql would target the dead cached leader.
+                    leader_ip = leader_name.replace("node-", "").replace("-", ".")
+                    try:
+                        with psycopg2.connect(
+                            host=leader_ip,
+                            port=5432,
+                            dbname="postgres",
+                            user="postgres",
+                            password="supersecretpassword",
+                            connect_timeout=5,
+                            sslmode="require",
+                        ) as conn:
+                            conn.autocommit = True
+                            with conn.cursor() as cur:
+                                cur.execute("SELECT 1")
+                        return True
+                    except psycopg2.Error:
+                        pass  # leader not yet reachable, keep waiting
             time.sleep(5)
         raise TimeoutError(
             f"Cluster did not become healthy within {timeout}s. Last status: {last_status}"
@@ -164,6 +196,16 @@ class ClusterManager:
             hostname=cfg.container_name,
             environment=env,
         )
+        # Disconnect from the default bridge network before starting so that
+        # `hostname -i` inside the container returns only the cluster network IP.
+        # Without this, Docker attaches the bridge first and hostname -i returns
+        # the bridge IP (172.17.0.x) as MY_IP, causing wrong etcd peer URLs.
+        try:
+            bridge = self.docker_client.networks.get("bridge")
+            bridge.disconnect(container)
+        except Exception:
+            pass  # Not connected to bridge or bridge doesn't exist
+
         network = self.docker_client.networks.get(NETWORK_NAME)
         network.connect(container, ipv4_address=cfg.ip)
         container.start()
@@ -183,7 +225,7 @@ class ClusterManager:
             self.remove_fresh_node(node_name)
 
     def exec_sql(self, query: str, dbname: str = "postgres") -> list:
-        deadline = time.time() + 30
+        deadline = time.time() + 120
         last_error: Exception | None = None
         while time.time() < deadline:
             leader_name = self.get_leader()

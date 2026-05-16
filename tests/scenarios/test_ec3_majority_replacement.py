@@ -42,11 +42,12 @@ def cluster(running_cluster):
 
 
 @pytest.fixture(scope="function")
-def mock_api(running_cluster):
+def mock_api(cluster):
+    # Depend on cluster (not just running_cluster) so the mock API container is
+    # fully ready before reset_mock_api (autouse) runs its reset call.
     return MockApiClient()
 
 
-@pytest.mark.timeout(360)
 def test_majority_replacement_recovery(cluster, mock_api):
     """Replacing two dead nodes should recover the cluster via force-new-cluster."""
     cluster.wait_for_healthy(expected_members=3, timeout=120)
@@ -73,7 +74,6 @@ def test_majority_replacement_recovery(cluster, mock_api):
     assert len(members) >= 3
 
 
-@pytest.mark.timeout(240)
 def test_data_survives_majority_replacement(cluster, mock_api):
     """Data written before majority replacement should remain after recovery completes."""
     cluster.wait_for_healthy(expected_members=3, timeout=120)

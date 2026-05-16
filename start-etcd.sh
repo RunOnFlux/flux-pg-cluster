@@ -63,20 +63,30 @@ try_join_existing_cluster() {
             echo "  Found existing cluster via $PEER_IP"
             ANY_PEER_REACHABLE=1
 
-            # Check if this node is already a member
-            EXISTING_MEMBER=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member list 2>/dev/null | grep "$MY_NAME" || true)
+            # Check if this node is already a member — match by name OR peer URL.
+            # Unstarted (ghost) members have no name in the member list output, so
+            # we must also match by peer URL to avoid duplicate-URL member add failures.
+            MY_PEER_URL="${PROTOCOL}://${MY_IP}:${HOST_ETCD_PEER_PORT}"
+            MEMBER_LIST=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member list 2>/dev/null || true)
+            EXISTING_MEMBER=$(echo "$MEMBER_LIST" | grep -E "$MY_NAME|$MY_PEER_URL" || true)
 
             if [ -n "$EXISTING_MEMBER" ]; then
-                # Detect ghost (unstarted or empty clientURLs)
+                # Detect ghost: [unstarted] flag, empty clientURLs, or peer-URL-only match (no name)
                 GHOST_CHECK=$(echo "$EXISTING_MEMBER" | grep -E "\[unstarted\]|clientURLs= " || true)
+                NAME_MATCH=$(echo "$EXISTING_MEMBER" | grep "$MY_NAME" || true)
+                if [ -z "$NAME_MATCH" ]; then
+                    # Matched by peer URL only — definitively a ghost (no name assigned yet)
+                    GHOST_CHECK="url-only-match"
+                fi
 
                 if [ -n "$GHOST_CHECK" ] || [ "$FORCE_REJOIN" = "1" ]; then
-                    if [ -n "$GHOST_CHECK" ]; then
-                        echo "  Found ghost registration (empty clientURLs) — removing and re-adding..."
+                    if [ -n "$GHOST_CHECK" ] && [ "$FORCE_REJOIN" != "1" ]; then
+                        echo "  Found ghost registration (unstarted/empty clientURLs) — removing and re-adding..."
                     else
                         echo "  Data was wiped — removing stale member entry to force fresh sync..."
                     fi
-                    EXISTING_ID=$(echo "$EXISTING_MEMBER" | cut -d: -f1 | tr -d ' ')
+                    # Extract the hex member ID (strip [unstarted] suffix and colon)
+                    EXISTING_ID=$(echo "$EXISTING_MEMBER" | sed 's/\[unstarted\]//' | cut -d: -f1 | tr -d ' ')
                     etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member remove "$EXISTING_ID" 2>&1 || true
                     sleep 2
                     # Fall through to add below
@@ -91,6 +101,33 @@ try_join_existing_cluster() {
             PEER_URL="${PROTOCOL}://${MY_IP}:${HOST_ETCD_PEER_PORT}"
             if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member add "$MY_NAME" "$PEER_URL" 2>&1; then
                 echo "  Successfully registered in existing cluster"
+                # Rebuild ETCD_INITIAL_CLUSTER from actual cluster membership to avoid
+                # "member count is unequal" when etcd starts with --initial-cluster-state=existing.
+                # The API-derived ETCD_INITIAL_CLUSTER lists all expected nodes, but when fresh
+                # nodes join sequentially only the already-registered members must be listed.
+                UPDATED_MEMBERS=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" member list 2>/dev/null || true)
+                if [ -n "$UPDATED_MEMBERS" ]; then
+                    NEW_INITIAL_CLUSTER=""
+                    while IFS= read -r MLINE; do
+                        [ -z "$MLINE" ] && continue
+                        M_PEER_URL=$(echo "$MLINE" | awk '{for(i=1;i<=NF;i++) if($i~/^peerURLs=/) {sub(/^peerURLs=/,"",$i); print $i; exit}}')
+                        [ -z "$M_PEER_URL" ] && continue
+                        if echo "$MLINE" | grep -q 'name='; then
+                            M_NAME=$(echo "$MLINE" | awk '{for(i=1;i<=NF;i++) if($i~/^name=/) {sub(/^name=/,"",$i); print $i; exit}}')
+                        elif [ "$M_PEER_URL" = "$PEER_URL" ]; then
+                            M_NAME="$MY_NAME"
+                        else
+                            echo "  Skipping unstarted member with unknown name at $M_PEER_URL"
+                            continue
+                        fi
+                        [ -z "$M_NAME" ] && continue
+                        NEW_INITIAL_CLUSTER="${NEW_INITIAL_CLUSTER:+${NEW_INITIAL_CLUSTER},}${M_NAME}=${M_PEER_URL}"
+                    done <<< "$UPDATED_MEMBERS"
+                    if [ -n "$NEW_INITIAL_CLUSTER" ]; then
+                        ETCD_INITIAL_CLUSTER="$NEW_INITIAL_CLUSTER"
+                        echo "  Rebuilt ETCD_INITIAL_CLUSTER from actual members: $ETCD_INITIAL_CLUSTER"
+                    fi
+                fi
                 CLUSTER_STATE=existing
                 return 0
             else
@@ -160,75 +197,80 @@ verify_cluster_id() {
 
 # Determine cluster state
 if [ -f /var/lib/etcd/member/snap/db ]; then
-    # Existing data directory — but verify we're in the right cluster
     echo "  Data directory found — checking if we need to rejoin..."
 
-    # Start etcd briefly in background to check cluster ID
-    etcd \
-        --name="$MY_NAME" \
-        --listen-client-urls="${PROTOCOL}://0.0.0.0:${ETCD_CLIENT_PORT}" \
-        --advertise-client-urls="${PROTOCOL}://${MY_IP}:${HOST_ETCD_CLIENT_PORT}" \
-        --listen-peer-urls="${PROTOCOL}://0.0.0.0:${ETCD_PEER_PORT}" \
-        --initial-advertise-peer-urls="${PROTOCOL}://${MY_IP}:${HOST_ETCD_PEER_PORT}" \
-        --initial-cluster="$ETCD_INITIAL_CLUSTER" \
-        --initial-cluster-state=existing \
-        --initial-cluster-token=postgres-cluster-token \
-        --data-dir=/var/lib/etcd \
-        $SSL_PARAMS &
-    ETCD_PID=$!
+    # FAST PEER CHECK: query peers before starting any temp etcd process.
+    # A stale etcd started with old data sends high-term raft messages that can
+    # disrupt the running cluster and cause leader loss. We avoid this entirely
+    # by consulting peers first. Only fall back to temp-etcd verification when
+    # no peers are reachable (coordinated cluster restart with all nodes down).
+    FAST_PEER_REACHABLE=0
+    for PEER_IP in $OTHER_IPS; do
+        PEER_CLIENT_URL="${PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
+        PEER_OUTPUT=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" --timeout=5s member list 2>/dev/null || true)
+        if [ -n "$PEER_OUTPUT" ]; then
+            FAST_PEER_REACHABLE=1
+            OUR_ENTRY=$(echo "$PEER_OUTPUT" | grep "$MY_NAME" || true)
+            if [ -n "$OUR_ENTRY" ]; then
+                echo "  Peer $PEER_IP knows about us: $OUR_ENTRY"
+            else
+                echo "  Peer $PEER_IP does not know about us (we may have been removed from the cluster)"
+            fi
+            break
+        fi
+    done
 
-    # Wait for it to start
-    sleep 10
-
-    # Disable set -e for this call: verify_cluster_id returns non-zero on mismatch/unreachable,
-    # and set -e would exit the script before we can capture and act on the result.
-    set +e
-    verify_cluster_id
-    VERIFY_RESULT=$?
-    set -e
-
-    # Kill the temporary etcd
-    kill $ETCD_PID 2>/dev/null || true
-    wait $ETCD_PID 2>/dev/null || true
-    sleep 2
-
-    if [ $VERIFY_RESULT -eq 2 ]; then
-        echo "  CLUSTER ID MISMATCH DETECTED — wiping data and rejoining..."
+    if [ $FAST_PEER_REACHABLE -eq 1 ]; then
+        # A live peer is reachable. Any local data we have is suspect:
+        #   • removed member:  stale data from before removal — must wipe and rejoin
+        #   • ghost (unstarted): failed previous join left partial data — must wipe
+        #   • started member with bad local data: corrupt/lagging — must wipe for fresh snapshot
+        # In all cases, wipe and let try_join_existing_cluster handle the member add/remove.
+        echo "  Live peer reachable — wiping local data to force a clean rejoin (avoids disrupting the running cluster)"
         rm -rf /var/lib/etcd/*
         FORCE_REJOIN=1
-        # Fall through to the "no data directory" path below
-    elif [ $VERIFY_RESULT -eq 0 ]; then
-        CLUSTER_STATE=existing
-        echo "  CLUSTER_STATE=existing (verified — same cluster)"
     else
-        # Local etcd didn't respond — check if peers see us as a full member.
-        # If they do, our local data is corrupt (empty raft log): wipe and force-rejoin
-        # so the leader sends a snapshot instead of a heartbeat (which would cause a panic).
-        PEER_SEES_US_AS_FULL=0
-        for PEER_IP in $OTHER_IPS; do
-            PEER_CLIENT_URL="${PROTOCOL}://${PEER_IP}:${HOST_ETCD_CLIENT_PORT}"
-            PEER_OUTPUT=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$PEER_CLIENT_URL" --timeout=5s member list 2>/dev/null || true)
-            if [ -n "$PEER_OUTPUT" ]; then
-                OUR_ENTRY=$(echo "$PEER_OUTPUT" | grep "$MY_NAME" || true)
-                if [ -n "$OUR_ENTRY" ]; then
-                    GHOST_CHECK=$(echo "$OUR_ENTRY" | grep -E "\[unstarted\]|clientURLs= " || true)
-                    if [ -z "$GHOST_CHECK" ]; then
-                        echo "  Peer $PEER_IP sees us as a full member but local etcd did not respond — data is likely corrupt"
-                        PEER_SEES_US_AS_FULL=1
-                    fi
-                fi
-                break
-            fi
-        done
+        # No peers reachable — cluster may be fully down (coordinated restart).
+        # Use a temp etcd to validate local data integrity before trusting it.
+        echo "  No peers reachable — starting temp etcd to verify local data..."
 
-        if [ $PEER_SEES_US_AS_FULL -eq 1 ]; then
-            echo "  CORRUPT DATA DETECTED — wiping and force rejoining to receive fresh snapshot..."
+        etcd \
+            --name="$MY_NAME" \
+            --listen-client-urls="${PROTOCOL}://0.0.0.0:${ETCD_CLIENT_PORT}" \
+            --advertise-client-urls="${PROTOCOL}://${MY_IP}:${HOST_ETCD_CLIENT_PORT}" \
+            --listen-peer-urls="${PROTOCOL}://0.0.0.0:${ETCD_PEER_PORT}" \
+            --initial-advertise-peer-urls="${PROTOCOL}://${MY_IP}:${HOST_ETCD_PEER_PORT}" \
+            --initial-cluster="$ETCD_INITIAL_CLUSTER" \
+            --initial-cluster-state=existing \
+            --initial-cluster-token=postgres-cluster-token \
+            --data-dir=/var/lib/etcd \
+            $SSL_PARAMS &
+        ETCD_PID=$!
+
+        sleep 10
+
+        set +e
+        verify_cluster_id
+        VERIFY_RESULT=$?
+        set -e
+
+        kill $ETCD_PID 2>/dev/null || true
+        wait $ETCD_PID 2>/dev/null || true
+        sleep 2
+
+        if [ $VERIFY_RESULT -eq 2 ]; then
+            echo "  CLUSTER ID MISMATCH DETECTED — wiping data and rejoining..."
             rm -rf /var/lib/etcd/*
             FORCE_REJOIN=1
-        else
-            # No peers reachable or we appear as ghost — trust existing data
+        elif [ $VERIFY_RESULT -eq 0 ]; then
             CLUSTER_STATE=existing
-            echo "  CLUSTER_STATE=existing (data directory found, no peers to verify)"
+            echo "  CLUSTER_STATE=existing (verified — same cluster, no peers currently reachable)"
+        else
+            # Temp etcd also failed to respond and no peers are reachable.
+            # Trust existing data — peers may still be starting up; the peer
+            # discovery retry loop below will wait for them.
+            CLUSTER_STATE=existing
+            echo "  CLUSTER_STATE=existing (data directory found, temp etcd unresponsive, no peers reachable — preserving data)"
         fi
     fi
 fi

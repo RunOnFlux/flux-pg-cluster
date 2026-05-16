@@ -16,6 +16,7 @@ services:
       PATRONI_LOOP_WAIT: "5"
       PATRONI_RETRY_TIMEOUT: "10"
       PATRONI_MASTER_START_TIMEOUT: "60"
+      FNF_COOLDOWN_SECS: "120"
 
   postgres-node2:
     environment:
@@ -25,6 +26,7 @@ services:
       PATRONI_LOOP_WAIT: "5"
       PATRONI_RETRY_TIMEOUT: "10"
       PATRONI_MASTER_START_TIMEOUT: "60"
+      FNF_COOLDOWN_SECS: "120"
 
   postgres-node3:
     environment:
@@ -34,3 +36,4 @@ services:
       PATRONI_LOOP_WAIT: "5"
       PATRONI_RETRY_TIMEOUT: "10"
       PATRONI_MASTER_START_TIMEOUT: "60"
+      FNF_COOLDOWN_SECS: "120"

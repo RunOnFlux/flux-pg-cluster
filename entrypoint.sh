@@ -134,7 +134,12 @@ if [ -n "$FLUX_API_URL" ] && echo "$FLUX_API_URL" | grep -q "172.20.0.5"; then
         "postgres-cluster-node3") MY_IP="172.20.0.12" ;;
         *)
             echo "Unknown hostname $(hostname), trying network interface detection"
-            MY_IP=$(hostname -i 2>&1 | awk '{print $1}') || echo "Failed"
+            # Prefer the cluster network IP (172.20.0.x) when multiple interfaces
+            # are present (e.g. Docker also attaches the default bridge 172.17.0.x).
+            MY_IP=$(hostname -i 2>/dev/null | tr ' ' '\n' | grep '^172\.20\.' | head -1)
+            if [ -z "$MY_IP" ]; then
+                MY_IP=$(hostname -i 2>&1 | awk '{print $1}') || echo "Failed"
+            fi
             ;;
     esac
     echo "Result: $MY_IP"

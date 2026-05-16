@@ -51,6 +51,11 @@ ETCD_UNAVAILABLE_RECOVERY_CYCLES=${ETCD_UNAVAILABLE_RECOVERY_CYCLES:-2}
 ETCD_UNAVAILABLE_COUNT_FILE=${ETCD_UNAVAILABLE_COUNT_FILE:-/tmp/etcd-unavailable-count}
 # Tracks consecutive cycles where etcd has no quorum — used for force-new-cluster recovery
 ETCD_NO_QUORUM_COUNT_FILE=${ETCD_NO_QUORUM_COUNT_FILE:-/tmp/etcd-no-quorum-count}
+# Timestamp file written when force-new-cluster fires; suppresses re-triggers while
+# newly-added members are still joining.  Default: 5 min (300 s).
+# Override to a shorter value in test environments (e.g. FNF_COOLDOWN_SECS=120).
+FNF_COOLDOWN_FILE=${FNF_COOLDOWN_FILE:-/tmp/force-new-cluster-last-triggered}
+FNF_COOLDOWN_SECS=${FNF_COOLDOWN_SECS:-300}
 
 echo "  UPDATE_INTERVAL_SECONDS: $UPDATE_INTERVAL_SECONDS"
 echo "  DESIRED_STATE_STABILITY_CYCLES: $DESIRED_STATE_STABILITY_CYCLES"
@@ -129,14 +134,30 @@ while true; do
     echo "External etcd endpoint: $EXTERNAL_ETCD_ENDPOINT"
     echo "Testing etcd connection to local endpoint first..."
 
-    # Test etcd connectivity first (try local endpoint)
+    # Test etcd connectivity using the /health HTTP endpoint.
+    # etcdctl member list requires raft quorum (it fails with "etcd cluster is
+    # unavailable" on a no-quorum member) and would drop us into the
+    # ETCD_UNAVAILABLE path even when the etcd process is running.
+    #
+    # In etcd v3.3.x the /health endpoint returns:
+    #   200 {"health":"true"}  — member has leader / quorum
+    #   503 {"health":"false"} — member is up but no leader / no quorum
+    # Both HTTP status codes mean the etcd process is running and accepting
+    # connections; only connection refused or timeout means the process is down.
+    # We therefore accept both 200 and 503 as "process reachable".
     ETCD_ENDPOINT=""
-    if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$LOCAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
-        echo "etcd connection successful via local endpoint"
+    _HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" $ETCD_CURL_SSL_OPTS \
+        "${ETCD_PROTOCOL}://127.0.0.1:${HOST_ETCD_CLIENT_PORT}/health" 2>/dev/null)
+    if [ "$_HEALTH_CODE" = "200" ] || [ "$_HEALTH_CODE" = "503" ]; then
+        echo "etcd process is running via local endpoint (HTTP $_HEALTH_CODE)"
         ETCD_ENDPOINT="$LOCAL_ETCD_ENDPOINT"
-    elif etcdctl $ETCDCTL_SSL_OPTS --endpoints="$EXTERNAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
-        echo "etcd connection successful via external endpoint"
-        ETCD_ENDPOINT="$EXTERNAL_ETCD_ENDPOINT"
+    else
+        _HEALTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" $ETCD_CURL_SSL_OPTS \
+            "${ETCD_PROTOCOL}://${MY_IP}:${HOST_ETCD_CLIENT_PORT}/health" 2>/dev/null)
+        if [ "$_HEALTH_CODE" = "200" ] || [ "$_HEALTH_CODE" = "503" ]; then
+            echo "etcd process is running via external endpoint (HTTP $_HEALTH_CODE)"
+            ETCD_ENDPOINT="$EXTERNAL_ETCD_ENDPOINT"
+        fi
     fi
 
     if [ -n "$ETCD_ENDPOINT" ]; then
@@ -144,13 +165,21 @@ while true; do
 
         # ================================================================
         # ETCD QUORUM HEALTH CHECK
-        # Track consecutive cycles where etcd reports no quorum.
+        # Track consecutive cycles where etcd has no write quorum.
         # Used later to trigger --force-new-cluster recovery when the
         # surviving node can't regain quorum after majority replacement.
+        #
+        # NOTE: The /health HTTP endpoint only checks local member health
+        # and returns {"health":"true"} even when the cluster has lost
+        # write quorum (e.g. after 2 of 3 nodes are killed). We use a
+        # write-probe instead: if etcd can accept a write, it has quorum.
         # ================================================================
-        ETCD_HEALTH_RESPONSE=$(curl -sf $ETCD_CURL_SSL_OPTS "${ETCD_ENDPOINT%:*}:${HOST_ETCD_CLIENT_PORT}/health" 2>/dev/null || echo '{"health":"false"}')
-        ETCD_HEALTH=$(echo "$ETCD_HEALTH_RESPONSE" | grep -o '"health":"[^"]*"' | cut -d'"' -f4 || echo "false")
-        echo "$(date): etcd health: $ETCD_HEALTH"
+        ETCD_HEALTH="false"
+        if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" \
+               set /_cluster_mgmt/quorum_probe "1" --ttl 1 >/dev/null 2>&1; then
+            ETCD_HEALTH="true"
+        fi
+        echo "$(date): etcd write-quorum health: $ETCD_HEALTH"
 
         NO_QUORUM_COUNT=$(cat "$ETCD_NO_QUORUM_COUNT_FILE" 2>/dev/null || echo 0)
         if [ "$ETCD_HEALTH" != "true" ]; then
@@ -160,6 +189,68 @@ while true; do
         else
             echo "0" > "$ETCD_NO_QUORUM_COUNT_FILE"
         fi
+
+        # ================================================================
+        # EARLY FORCE-NEW-CLUSTER CHECK
+        # Trigger quorum recovery before attempting member list (which also
+        # requires quorum in etcd v3 and would return nothing on a no-quorum
+        # node, preventing MEMBERS_TO_REMOVE from being populated).
+        # Conditions: no write quorum for ≥ stability-threshold cycles,
+        # the desired state is stable (Flux API consistent), this node has
+        # postgres data (safe to promote, won't create an empty cluster),
+        # and the post-trigger cooldown has expired (prevents re-triggering
+        # while newly-added members are still joining the restored cluster).
+        # ================================================================
+        if [ "$ETCD_HEALTH" != "true" ] && \
+           [ "$NO_QUORUM_COUNT" -ge "$DESIRED_STATE_STABILITY_CYCLES" ] && \
+           [ "$STATE_STABLE" = "true" ] && \
+           [ -d "/var/lib/postgresql/data/global" ]; then
+            _FNF_LAST=$(cat "$FNF_COOLDOWN_FILE" 2>/dev/null || echo 0)
+            _FNF_NOW=$(date +%s)
+            _FNF_ELAPSED=$((_FNF_NOW - _FNF_LAST))
+            if [ "$_FNF_ELAPSED" -lt "$FNF_COOLDOWN_SECS" ]; then
+                echo "$(date): force-new-cluster cooldown active (${_FNF_ELAPSED}s / ${FNF_COOLDOWN_SECS}s), skipping re-trigger while new members join"
+            else
+            echo "$(date): QUORUM RECOVERY TRIGGERED"
+            echo "$(date):   No quorum for $NO_QUORUM_COUNT consecutive cycles (threshold: $DESIRED_STATE_STABILITY_CYCLES)"
+            echo "$(date):   Writing --force-new-cluster flag and restarting etcd..."
+            touch /tmp/force-new-cluster
+            date +%s > "$FNF_COOLDOWN_FILE"
+            echo "0" > "$ETCD_NO_QUORUM_COUNT_FILE"
+            # Do NOT stop Patroni here. Patroni handles etcd restarts gracefully:
+            # it reconnects after etcd comes back and re-acquires the leader lock
+            # while PostgreSQL keeps running (we wipe the stale leader key below
+            # so there is no TTL delay). Stopping Patroni would create a race
+            # window where fresh joining nodes could acquire the DCS initialize
+            # key and bootstrap a new empty cluster before node1's Patroni
+            # restarts (due to the 20s sleep in its startup).
+            supervisorctl restart etcd 2>/dev/null || true
+            # Wait for etcd to come up as a single-member cluster
+            for _i in $(seq 1 30); do
+                sleep 2
+                if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$LOCAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
+                    echo "$(date): etcd is up after force-new-cluster restart"
+                    break
+                fi
+            done
+            # Wipe stale Patroni DCS keys. --force-new-cluster preserves the etcd
+            # KV store, including the old leader key backed by a v3 lease. Due to
+            # etcd lease checkpointing (default interval: 5 min), the lease can be
+            # revived with a fresh TTL after restart, delaying promotion by up to
+            # TTL seconds. Removing the key directly lets node1 acquire leadership
+            # immediately without waiting for lease expiry.
+            echo "$(date): Wiping stale Patroni DCS leader key to allow immediate promotion..."
+            etcdctl $ETCDCTL_SSL_OPTS --endpoints="$LOCAL_ETCD_ENDPOINT" \
+                rm /patroni/postgres-cluster/leader 2>/dev/null || true
+            # Remove stale member registrations; Patroni re-registers on each
+            # loop iteration so these will be recreated within seconds.
+            etcdctl $ETCDCTL_SSL_OPTS --endpoints="$LOCAL_ETCD_ENDPOINT" \
+                rm --recursive /patroni/postgres-cluster/members 2>/dev/null || true
+            echo "$(date): Quorum recovery complete — new nodes can now join"
+            sleep "$UPDATE_INTERVAL_SECONDS"
+            continue
+            fi  # end cooldown check
+        fi  # end force-new-cluster trigger
 
         # Get raw member list
         RAW_MEMBER_LIST=$(etcdctl $ETCDCTL_SSL_OPTS --endpoints="$ETCD_ENDPOINT" member list 2>/dev/null || true)
@@ -441,49 +532,6 @@ while true; do
         echo "Summary:"
         echo "  Members to keep: $(echo "$CURRENT_MEMBERS" | wc -l) - $(echo "$DESIRED_IPS" | wc -l) = $(echo "$MEMBERS_TO_REMOVE" | wc -w) will be removed"
         echo "  New members expected: $(echo "$NEW_MEMBERS" | wc -w)"
-
-        # ================================================================
-        # FORCE-NEW-CLUSTER QUORUM RECOVERY
-        # When the majority of nodes are simultaneously replaced (e.g. 2/3
-        # nodes swapped at once), the surviving node loses etcd quorum.
-        # etcd requires quorum for member add/remove, so new nodes can
-        # never join and the cluster is permanently deadlocked.
-        #
-        # Recovery: if this node has been the surviving member for
-        # DESIRED_STATE_STABILITY_CYCLES without quorum, AND the stale
-        # members have been absent from the Flux API long enough, write
-        # the force-new-cluster flag and restart etcd so it forms a
-        # single-member cluster. New nodes can then join normally.
-        #
-        # Safety gate: only trigger if PostgreSQL data exists locally
-        # (avoids bootstrapping an empty node as primary).
-        # ================================================================
-        NO_QUORUM_COUNT=$(cat "$ETCD_NO_QUORUM_COUNT_FILE" 2>/dev/null || echo 0)
-        if [ "$ETCD_HEALTH" != "true" ] && \
-           [ "$NO_QUORUM_COUNT" -ge "$DESIRED_STATE_STABILITY_CYCLES" ] && \
-           [ -n "$MEMBERS_TO_REMOVE" ] && \
-           [ -d "/var/lib/postgresql/data/global" ]; then
-            echo "$(date): QUORUM RECOVERY TRIGGERED"
-            echo "$(date):   No quorum for $NO_QUORUM_COUNT consecutive cycles (threshold: $DESIRED_STATE_STABILITY_CYCLES)"
-            echo "$(date):   Stale members pending removal: $MEMBERS_TO_REMOVE"
-            echo "$(date):   Writing --force-new-cluster flag and restarting etcd..."
-            touch /tmp/force-new-cluster
-            echo "0" > "$ETCD_NO_QUORUM_COUNT_FILE"
-            supervisorctl stop patroni 2>/dev/null || true
-            supervisorctl restart etcd 2>/dev/null || true
-            # Wait for etcd to come up as a single-member cluster
-            for _i in $(seq 1 30); do
-                sleep 2
-                if etcdctl $ETCDCTL_SSL_OPTS --endpoints="$LOCAL_ETCD_ENDPOINT" member list >/dev/null 2>&1; then
-                    echo "$(date): etcd is up after force-new-cluster restart"
-                    break
-                fi
-            done
-            supervisorctl start patroni 2>/dev/null || true
-            echo "$(date): Quorum recovery complete — new nodes can now join"
-            sleep "$UPDATE_INTERVAL_SECONDS"
-            continue
-        fi
 
         # Process removals
         for CURRENT_IP in $MEMBERS_TO_REMOVE; do

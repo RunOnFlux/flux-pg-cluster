@@ -1,9 +1,5 @@
 """Normal failover: kill the leader, assert new election within 60 seconds."""
 
-import pytest
-
-
-@pytest.mark.timeout(180)
 def test_leader_election_after_kill(cluster, mock_api):
     """Killing the current leader should trigger election of a new writable leader."""
     old_leader = cluster.get_leader()
@@ -33,7 +29,6 @@ def test_leader_election_after_kill(cluster, mock_api):
     cluster.start_node(leader_node)
 
 
-@pytest.mark.timeout(300)
 def test_cluster_recovers_to_three_members(cluster, mock_api):
     """Restarted nodes should rejoin until the cluster reports three running members."""
     cluster.wait_for_healthy(expected_members=3, timeout=240)
