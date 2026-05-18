@@ -1,5 +1,5 @@
 # Flux PostgreSQL Cluster
-![Version](https://img.shields.io/badge/version-1.1.12-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
 ![Docker](https://img.shields.io/badge/Docker-required-blue.svg)
