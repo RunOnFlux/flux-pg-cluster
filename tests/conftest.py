@@ -21,7 +21,7 @@ def docker_client():
 
 @pytest.fixture(scope="session")
 def project_dir() -> Path:
-    return Path("/root/flux-pg-cluster")
+    return Path(__file__).parent.parent.resolve()
 
 
 @pytest.fixture(scope="session")
