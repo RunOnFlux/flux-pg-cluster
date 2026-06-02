@@ -218,10 +218,30 @@ func (c *Config) applyKV(key, val string) {
 		c.UpdateIntervalSeconds, _ = strconv.Atoi(val)
 	case "DESIRED_STATE_STABILITY_CYCLES":
 		c.DesiredStateStabilityCycles, _ = strconv.Atoi(val)
+	case "ETCD_UNAVAILABLE_RECOVERY_CYCLES":
+		c.EtcdUnavailableRecoveryCycles, _ = strconv.Atoi(val)
 	case "PATRONI_TTL":
 		c.PatroniTTL, _ = strconv.Atoi(val)
+	case "PATRONI_LOOP_WAIT":
+		c.PatroniLoopWait, _ = strconv.Atoi(val)
+	case "PATRONI_RETRY_TIMEOUT":
+		c.PatroniRetryTimeout, _ = strconv.Atoi(val)
+	case "PATRONI_MAX_LAG":
+		c.PatroniMaxLag, _ = strconv.Atoi(val)
+	case "PATRONI_MASTER_START_TIMEOUT":
+		c.PatroniMasterStartTimeout, _ = strconv.Atoi(val)
+	case "PATRONI_MASTER_STOP_TIMEOUT":
+		c.PatroniMasterStopTimeout, _ = strconv.Atoi(val)
+	case "PATRONI_USE_SLOTS":
+		c.PatroniUseSlots = strings.EqualFold(val, "true")
 	case "PATRONI_SYNCHRONOUS_MODE":
 		c.PatroniSynchronousMode = strings.EqualFold(val, "true")
+	case "PATRONI_SYNCHRONOUS_MODE_STRICT":
+		c.PatroniSynchronousModeStrict = strings.EqualFold(val, "true")
+	case "PATRONI_SYNCHRONOUS_NODE_COUNT":
+		c.PatroniSynchronousNodeCount, _ = strconv.Atoi(val)
+	case "SSL_CERT_VALIDITY_DAYS":
+		c.SSLCertValidityDays, _ = strconv.Atoi(val)
 	}
 }
 
