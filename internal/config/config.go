@@ -14,8 +14,9 @@ const ClusterEnvFile = "/etc/cluster_env"
 
 // Config aggregates all cluster-wide settings used by the agent subcommands.
 type Config struct {
-	AppName  string
-	MyName   string
+	AppName      string
+	PatroniScope string
+	MyName       string
 	MyIP     string
 	HostName string
 
@@ -101,6 +102,7 @@ func envBool(key string, def bool) bool {
 func FromEnv() *Config {
 	c := &Config{
 		AppName:                       env("APP_NAME", "postgres-cluster"),
+		PatroniScope:                  env("PATRONI_SCOPE", "postgres-cluster"),
 		PostgresDB:                    env("POSTGRES_DB", "postgres"),
 		PostgresSuperuserPassword:     env("POSTGRES_SUPERUSER_PASSWORD", "postgres"),
 		PostgresReplicationPassword:   env("POSTGRES_REPLICATION_PASSWORD", "replication"),
@@ -176,6 +178,8 @@ func (c *Config) applyKV(key, val string) {
 		c.MyIP = val
 	case "APP_NAME":
 		c.AppName = val
+	case "PATRONI_SCOPE":
+		c.PatroniScope = val
 	case "ETCD_HOSTS":
 		c.EtcdHosts = val
 	case "ETCD_INITIAL_CLUSTER":
@@ -267,6 +271,7 @@ func (c *Config) WriteClusterEnv() error {
 		fmt.Sprintf("PATRONI_SYNCHRONOUS_MODE_STRICT=%s", strconv.FormatBool(c.PatroniSynchronousModeStrict)),
 		fmt.Sprintf("PATRONI_SYNCHRONOUS_NODE_COUNT=%d", c.PatroniSynchronousNodeCount),
 		"APP_NAME=" + c.AppName,
+		"PATRONI_SCOPE=" + c.PatroniScope,
 		fmt.Sprintf("SSL_ENABLED=%s", strconv.FormatBool(c.SSLEnabled)),
 		fmt.Sprintf("SSL_CERT_VALIDITY_DAYS=%d", c.SSLCertValidityDays),
 		fmt.Sprintf("ALLOW_NEW_CLUSTER_BOOTSTRAP=%s", strconv.FormatBool(c.AllowNewClusterBootstrap)),

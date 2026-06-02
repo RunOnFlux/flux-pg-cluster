@@ -374,10 +374,10 @@ func triggerForceNewCluster(cfg *config.Config, ec *etcdmgr.Client, flagFile, co
 	// Wipe stale Patroni DCS keys so the leader can be re-acquired immediately
 	pkglog.Infof("wiping stale Patroni DCS keys")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = ec.RM(ctx, "/patroni/postgres-cluster/leader")
+	_ = ec.RM(ctx, fmt.Sprintf("/patroni/%s/leader", cfg.PatroniScope))
 	cancel()
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = ec.RMRecursive(ctx2, "/patroni/postgres-cluster/members")
+	_ = ec.RMRecursive(ctx2, fmt.Sprintf("/patroni/%s/members", cfg.PatroniScope))
 	cancel2()
 	pkglog.Infof("quorum recovery complete — new nodes can now join")
 }
@@ -420,7 +420,7 @@ func checkStalePatroniLeader(cfg *config.Config, ec *etcdmgr.Client) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	leader, err := ec.Get(ctx, "/patroni/postgres-cluster/leader")
+	leader, err := ec.Get(ctx, fmt.Sprintf("/patroni/%s/leader", cfg.PatroniScope))
 	cancel()
 	if err != nil || leader == "" || leader == cfg.MyName {
 		return
@@ -434,7 +434,7 @@ func checkStalePatroniLeader(cfg *config.Config, ec *etcdmgr.Client) {
 	}
 	pkglog.Warnf("Patroni leader %s unreachable at %s — clearing stale leader key", leader, leaderIP)
 	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = ec.RM(rctx, "/patroni/postgres-cluster/leader")
+	_ = ec.RM(rctx, fmt.Sprintf("/patroni/%s/leader", cfg.PatroniScope))
 	rcancel()
 }
 
@@ -447,10 +447,15 @@ func checkStalePatroniLeader(cfg *config.Config, ec *etcdmgr.Client) {
 //     replicas with matching data can rejoin without wiping.
 //
 //  2. This node's local PG data has a system ID that doesn't match /initialize
-//     AND there is a healthy primary. The data is from the wrong cluster epoch.
+//     AND there is at least one healthy cluster member (primary or replica) that
+//     confirms the correct system ID. The data is from the wrong cluster epoch.
 //     Action: wipe local PG data and restart Patroni so it pg_basebackup.
+//
+// Note: a running replica is sufficient evidence for case 2. We do not require
+// the primary to be reachable — waiting for it would leave crash-looping nodes
+// unhealed whenever the primary is on a different network segment.
 func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []string) {
-	initKey := fmt.Sprintf("/patroni/%s/initialize", cfg.AppName)
+	initKey := fmt.Sprintf("/patroni/%s/initialize", cfg.PatroniScope)
 
 	// Read the etcd cluster-initialize system identifier.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -461,42 +466,55 @@ func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []s
 		return
 	}
 
-	// Find a primary among desired peers and get its system ID.
+	// Poll all desired peers for Patroni info. Track the primary separately
+	// (needed for Case 1) and any member whose system ID matches /initialize
+	// (sufficient for Case 2).
 	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
 	primarySysID := ""
 	primaryIP := ""
+	anyMatchingMember := false // any peer running the cluster with etcdSysID
+
 	for _, ip := range desiredIPs {
 		ictx, icancel := context.WithTimeout(context.Background(), 5*time.Second)
 		info, infoErr := pc.GetInfo(ictx, ip)
 		icancel()
-		if infoErr != nil || info == nil {
+		if infoErr != nil || info == nil || info.DatabaseSystemIdentifier == "" {
 			continue
 		}
-		if info.Role == "primary" && info.DatabaseSystemIdentifier != "" {
+		// Accept both "primary" (Patroni 3+) and "master" (older Patroni).
+		if info.Role == "primary" || info.Role == "master" {
 			primarySysID = info.DatabaseSystemIdentifier
 			primaryIP = ip
-			break
 		}
-	}
-
-	if primarySysID == "" {
-		// No reachable primary — cannot make authoritative decisions.
-		return
+		if info.DatabaseSystemIdentifier == etcdSysID {
+			anyMatchingMember = true
+		}
 	}
 
 	// Case 1: etcd /initialize key is stale (doesn't match the running primary).
-	if etcdSysID != primarySysID {
-		pkglog.Warnf("system ID mismatch: etcd /initialize=%s but primary %s reports %s — updating initialize key",
+	// Only update when we have confirmed the primary and at least one other
+	// member also carries the primary's system ID (majority consensus).
+	if primarySysID != "" && primarySysID != etcdSysID && anyMatchingMember {
+		// anyMatchingMember means some peer already agreed with etcdSysID, so
+		// the primary is the outlier — don't override yet.
+		// If NO member matches etcdSysID, the initialize key is genuinely stale.
+	} else if primarySysID != "" && primarySysID != etcdSysID && !anyMatchingMember {
+		pkglog.Warnf("system ID mismatch: etcd /initialize=%s but primary %s reports %s and no member confirms /initialize — updating initialize key",
 			etcdSysID, primaryIP, primarySysID)
 		uctx, ucancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = ec.Set(uctx, initKey, primarySysID)
 		ucancel()
-		// Refresh etcdSysID for case 2 below.
+		// Treat the updated value as authoritative going forward.
 		etcdSysID = primarySysID
+		anyMatchingMember = true
 	}
 
 	// Case 2: local PG data has a system ID from a different cluster epoch.
-	// Only attempt if we are NOT the primary and PG data actually exists.
+	// Only attempt if we are NOT the primary and PG data actually exists,
+	// and at least one peer confirms the correct cluster system ID.
+	if !anyMatchingMember {
+		return
+	}
 	if cfg.MyIP == primaryIP {
 		return
 	}

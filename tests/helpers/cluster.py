@@ -224,6 +224,39 @@ class ClusterManager:
         for node_name in list(self.dynamic_nodes):
             self.remove_fresh_node(node_name)
 
+    def etcd_cmd(self, node_name: str, *args: str) -> str:
+        """Run an etcdctl command inside a container and return stdout."""
+        cfg = self._config_for(node_name)
+        container = self._container(node_name)
+        # SSL cert paths match etcdSSLOpts() in the Go agent.
+        ssl_flags = [
+            "--cert-file=/etc/ssl/cluster/etcd/client.crt",
+            "--key-file=/etc/ssl/cluster/etcd/client.key",
+            "--ca-file=/etc/ssl/cluster/ca/ca.crt",
+        ]
+        endpoint = f"https://127.0.0.1:{cfg.etcd_client_port}"
+        cmd = ["etcdctl", "--endpoints", endpoint] + ssl_flags + list(args)
+        exit_code, output = container.exec_run(cmd)
+        result = output.decode().strip() if output else ""
+        if exit_code != 0:
+            raise RuntimeError(f"etcdctl {args} on {node_name} failed (exit {exit_code}): {result}")
+        return result
+
+    def etcd_get(self, node_name: str, key: str) -> str:
+        """Read an etcd v2 key value from a container."""
+        return self.etcd_cmd(node_name, "get", key)
+
+    def etcd_set(self, node_name: str, key: str, value: str) -> None:
+        """Write an etcd v2 key value from a container."""
+        self.etcd_cmd(node_name, "set", key, value)
+
+    def get_pg_system_id(self, node_name: str) -> Optional[str]:
+        """Return the PG database_system_identifier from the Patroni API."""
+        status = self.patroni_status(node_name)
+        if status:
+            return status.get("database_system_identifier")
+        return None
+
     def exec_sql(self, query: str, dbname: str = "postgres") -> list:
         deadline = time.time() + 120
         last_error: Exception | None = None
