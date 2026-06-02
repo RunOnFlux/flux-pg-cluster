@@ -78,14 +78,15 @@ Key Points:
 2. **Connect from other Flux components**:
    ```bash
    # Recommended — connect via proxy (always routes to current primary):
-   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]
+   postgresql://postgres:[PASSWORD]@[PG_COMPONENT_NAME]:5433/[POSTGRES_DB]
 
    # With SSL (recommended):
-   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]?sslmode=require
+   postgresql://postgres:[PASSWORD]@[PG_COMPONENT_NAME]:5433/[POSTGRES_DB]?sslmode=require
 
    # Direct connection to a specific node (bypasses proxy — use only for read replicas or diagnostics):
-   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]
+   postgresql://postgres:[PASSWORD]@[PG_COMPONENT_NAME]:5432/[POSTGRES_DB]
    ```
+   > Replace `[PG_COMPONENT_NAME]` with the name you gave the PostgreSQL component in your Flux app (e.g. `pg`). Example: `postgresql://postgres:password@pg:5433/umami`
 
 3. **Monitor your cluster**:
    - Access Patroni REST API: `https://your-app-name.app_{patroni_rest_api_port}.runonflux.io`
@@ -206,27 +207,27 @@ After a failover, the proxy detects the new primary within `PROXY_HEALTH_INTERVA
 
 **Recommended (via proxy — always routes to primary):**
 ```
-Host: flux{COMPONENT_NAME}_{APPNAME}
+Host: [PG_COMPONENT_NAME]   (the component name you set in Flux, e.g. "pg")
 Port: 5433
 Database: [POSTGRES_DB]
 Username: postgres
 Password: [POSTGRES_SUPERUSER_PASSWORD]
 
-postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]
+postgresql://postgres:[PASSWORD]@[PG_COMPONENT_NAME]:5433/[POSTGRES_DB]
 
 # With SSL enabled:
-postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]?sslmode=require
+postgresql://postgres:[PASSWORD]@[PG_COMPONENT_NAME]:5433/[POSTGRES_DB]?sslmode=require
 ```
 
 **Direct connection (bypasses proxy — use only for read replicas or diagnostics):**
 ```
-Host: flux{COMPONENT_NAME}_{APPNAME}
+Host: [PG_COMPONENT_NAME]
 Port: 5432
 Database: [POSTGRES_DB]
 Username: postgres
 Password: [POSTGRES_SUPERUSER_PASSWORD]
 
-postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]
+postgresql://postgres:[PASSWORD]@[PG_COMPONENT_NAME]:5432/[POSTGRES_DB]
 ```
 
 **For external connections (from host machine or remote clients):**
