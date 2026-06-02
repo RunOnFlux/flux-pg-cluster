@@ -43,6 +43,7 @@ type Config struct {
 	AllowNewClusterBootstrap     bool
 	AllowAnyNodeBootstrap        bool
 	AutoBootstrapIfFresh         bool
+	DeadClusterRecovery          bool
 	EtcdJoinMaxRetries           int
 	EtcdJoinRetryDelaySeconds    int
 	UpdateIntervalSeconds        int
@@ -117,6 +118,7 @@ func FromEnv() *Config {
 		AllowNewClusterBootstrap:      envBool("ALLOW_NEW_CLUSTER_BOOTSTRAP", false),
 		AllowAnyNodeBootstrap:         envBool("ALLOW_ANY_NODE_BOOTSTRAP", false),
 		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", true),
+		DeadClusterRecovery:           envBool("DEAD_CLUSTER_RECOVERY", true),
 		EtcdJoinMaxRetries:            envInt("ETCD_JOIN_MAX_RETRIES", 12),
 		EtcdJoinRetryDelaySeconds:     envInt("ETCD_JOIN_RETRY_DELAY_SECONDS", 10),
 		UpdateIntervalSeconds:         envInt("UPDATE_INTERVAL_SECONDS", 60),
@@ -206,6 +208,8 @@ func (c *Config) applyKV(key, val string) {
 		c.AllowAnyNodeBootstrap = strings.EqualFold(val, "true")
 	case "AUTO_BOOTSTRAP_IF_FRESH":
 		c.AutoBootstrapIfFresh = strings.EqualFold(val, "true")
+	case "DEAD_CLUSTER_RECOVERY":
+		c.DeadClusterRecovery = strings.EqualFold(val, "true")
 	case "ETCD_JOIN_MAX_RETRIES":
 		c.EtcdJoinMaxRetries, _ = strconv.Atoi(val)
 	case "ETCD_JOIN_RETRY_DELAY_SECONDS":
@@ -248,6 +252,7 @@ func (c *Config) WriteClusterEnv() error {
 		fmt.Sprintf("ALLOW_NEW_CLUSTER_BOOTSTRAP=%s", strconv.FormatBool(c.AllowNewClusterBootstrap)),
 		fmt.Sprintf("ALLOW_ANY_NODE_BOOTSTRAP=%s", strconv.FormatBool(c.AllowAnyNodeBootstrap)),
 		fmt.Sprintf("AUTO_BOOTSTRAP_IF_FRESH=%s", strconv.FormatBool(c.AutoBootstrapIfFresh)),
+		fmt.Sprintf("DEAD_CLUSTER_RECOVERY=%s", strconv.FormatBool(c.DeadClusterRecovery)),
 		fmt.Sprintf("ETCD_JOIN_MAX_RETRIES=%d", c.EtcdJoinMaxRetries),
 		fmt.Sprintf("ETCD_JOIN_RETRY_DELAY_SECONDS=%d", c.EtcdJoinRetryDelaySeconds),
 		fmt.Sprintf("UPDATE_INTERVAL_SECONDS=%d", c.UpdateIntervalSeconds),

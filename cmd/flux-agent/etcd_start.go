@@ -411,9 +411,18 @@ func decideBootstrap(cfg *config.Config, dataDir string) string {
 			pkglog.Infof("fresh multi-member install detected on deterministic candidate — auto-bootstrap")
 			return "new"
 		}
+		// Dead cluster recovery: candidate lost its etcd data but has PG data,
+		// and ALL peers were already confirmed unreachable (NoPeersReachable path).
+		// Bootstrapping a fresh 1-node etcd is safe here — pg data is preserved
+		// and Patroni will start from existing data. Other nodes will join after.
+		if cfg.DeadClusterRecovery && etcdDataEmpty && !pgDataEmpty && cfg.MyName == candidate {
+			pkglog.Warnf("DEAD CLUSTER RECOVERY: etcd data lost on all peers, PG data preserved — candidate bootstrapping new etcd cluster to recover")
+			pkglog.Warnf("PG data will NOT be wiped; Patroni will start from existing data as primary")
+			return "new"
+		}
 		pkglog.Errorf("multi-member cluster, no peer found, refusing automatic bootstrap (split-brain prevention)")
-		pkglog.Errorf("conditions: candidate=%v etcd_empty=%v pg_empty=%v auto_fresh=%v",
-			cfg.MyName == candidate, etcdDataEmpty, pgDataEmpty, cfg.AutoBootstrapIfFresh)
+		pkglog.Errorf("conditions: candidate=%v etcd_empty=%v pg_empty=%v auto_fresh=%v dead_recovery=%v",
+			cfg.MyName == candidate, etcdDataEmpty, pgDataEmpty, cfg.AutoBootstrapIfFresh, cfg.DeadClusterRecovery)
 		return ""
 	}
 
