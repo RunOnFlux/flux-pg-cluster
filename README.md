@@ -25,19 +25,28 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
    │  │  Your App   │  │       │  │  Your App   │  │       │  │  Your App   │  │
    │  │ (Component) │  │       │  │ (Component) │  │       │  │ (Component) │  │
    │  └──────┬──────┘  │       │  └──────┬──────┘  │       │  └──────┬──────┘  │
+   │         │ :5433   │       │         │ :5433   │       │         │ :5433   │
    │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │
-   │  │ PostgreSql  │  │       │  │ PostgreSql  │  │       │  │ PostgreSql  │  │
+   │  │   Proxy     │  │       │  │   Proxy     │  │       │  │   Proxy     │  │
+   │  │(primary-    │  │       │  │(primary-    │  │       │  │(primary-    │  │
+   │  │  routing)   │  │       │  │  routing)   │  │       │  │  routing)   │  │
+   │  └──────┬──────┘  │       │  └──────┬──────┘  │       │  └──────┬──────┘  │
+   │         │         │       │         │         │       │         │         │
+   │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │       │  ┌──────▼──────┐  │
+   │  │ PostgreSQL  │  │       │  │ PostgreSQL  │  │       │  │ PostgreSQL  │  │
    │  │Patroni+etcd │  │       │  │Patroni+etcd │  │       │  │Patroni+etcd │  │
    │  │   PRIMARY   │◄─┼───────┼─►│  SECONDARY  │◄─┼───────┼─►│  SECONDARY  │  │
    │  │(Read+Write) │  │       │  │ (Read-Only) │  │       │  │ (Read-Only) │  │
    │  └─────────────┘  │       │  └─────────────┘  │       │  └─────────────┘  │
    └───────────────────┘       └───────────────────┘       └───────────────────┘
-            │                            │                           │ 
+            │                            │                           │
             └────────────────────────────┼───────────────────────────┘
                             Replication via Public Internet
 Key Points:
-• Each application instance connects ONLY to its local PostgreSql instance directly
-• PostgreSql instances replicate data across nodes via public internet
+• Each application connects to its local proxy on port 5433
+• The proxy polls Patroni to discover the current primary and forwards all connections there
+• After a failover the proxy automatically reroutes new connections to the new primary
+• PostgreSQL instances replicate data across nodes via public internet
 • Only PRIMARY accepts writes; SECONDARY nodes are read-only
 ```
 
@@ -46,9 +55,9 @@ Key Points:
   - Add a component for PostgreSQL.
   - Use the official Docker image: `runonflux/flux-pg-cluster:latest`.
   - Set the Container Data for the component to `/var/lib/postgresql/data`.
-  - Add these ports to the `Cont. Ports` field: `[5432,8008,2379,2380]`.
-  - Using the `Ports` field, map those ports to new ones, for example: `[15432,18008,12379,12380]`.
-  - For the `Domains` field, add this: `["","","",""]`.
+  - Add these ports to the `Cont. Ports` field: `[5432,5433,8008,2379,2380]`.
+  - Using the `Ports` field, map those ports to new ones, for example: `[15432,15433,18008,12379,12380]`.
+  - For the `Domains` field, add this: `["","","","",""]`.
   - Use the following sample to set the environment variables for the PostgreSQL component:
 
    ```json
@@ -68,11 +77,14 @@ Key Points:
 
 2. **Connect from other Flux components**:
    ```bash
-   # Use this connection string in your applications:
-   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]
+   # Recommended — connect via proxy (always routes to current primary):
+   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]
 
    # With SSL (recommended):
-   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]?sslmode=require
+   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]?sslmode=require
+
+   # Direct connection to a specific node (bypasses proxy — use only for read replicas or diagnostics):
+   postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]
    ```
 
 3. **Monitor your cluster**:
@@ -118,6 +130,9 @@ Key Points:
 | `PATRONI_SYNCHRONOUS_MODE` | Enable synchronous replication — every commit waits for at least one replica to acknowledge before returning success. Eliminates data loss on failover but increases write latency and risks write-stall if all replicas go offline. See note below. | `false` |
 | `PATRONI_SYNCHRONOUS_MODE_STRICT` | When `true`, the primary **blocks all writes** if no synchronous replica is available instead of silently falling back to async. Only meaningful when `PATRONI_SYNCHRONOUS_MODE=true`. | `false` |
 | `PATRONI_SYNCHRONOUS_NODE_COUNT` | Number of synchronous replicas required to acknowledge a commit when `PATRONI_SYNCHRONOUS_MODE=true`. Maps to Patroni's `synchronous_node_count`. Has no effect when synchronous mode is disabled. | `1` |
+| `PROXY_ENABLED` | Enable the TCP primary-routing proxy on port 5433. Set to `false` to disable (port 5433 will not be opened). | `true` |
+| `PROXY_LISTEN_PORT` | Port the primary-routing proxy listens on inside the container | `5433` |
+| `PROXY_HEALTH_INTERVAL_SECONDS` | How often (seconds) the proxy polls Patroni to discover the current primary | `3` |
 
 ### Split-Brain Prevention Controls
 
@@ -168,50 +183,68 @@ Set `PATRONI_SYNCHRONOUS_MODE=true` to switch to **synchronous quorum replicatio
 
 ### Service Management
 
-The supervisord configuration manages three main processes:
+The supervisord configuration manages four main processes:
 
 - **etcd**: Distributed key-value store for cluster coordination
 - **patroni**: PostgreSQL high availability manager
-- **updater**: Background script that maintains cluster membership
+- **updater**: Background daemon that maintains cluster membership
+- **proxy**: TCP primary-routing proxy on port 5433 (disable with `PROXY_ENABLED=false`)
 
 ### Access PostgreSQL
 
+#### Primary-Routing Proxy (Recommended)
+
+Each node runs a lightweight TCP proxy on **port 5433** that automatically routes all connections to the current Patroni primary. Your application does not need to know which node is the primary — just connect to any cluster node on port 5433 and writes will always land on the correct node, even after a failover.
+
+```
+App → any-node:5433 (proxy) → discovers primary via Patroni API → forwards to primary:5432
+```
+
+After a failover, the proxy detects the new primary within `PROXY_HEALTH_INTERVAL_SECONDS` (default 3 s) and routes new connections there automatically. In-flight connections are not interrupted.
+
 #### Connection Strings
 
-**For connections from within Docker containers (inside the cluster network):**
+**Recommended (via proxy — always routes to primary):**
 ```
 Host: flux{COMPONENT_NAME}_{APPNAME}
-Port: 5432
-Database: postgres
+Port: 5433
+Database: [POSTGRES_DB]
 Username: postgres
 Password: [POSTGRES_SUPERUSER_PASSWORD]
 
-Example connection string:
-postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres
+postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]
 
 # With SSL enabled:
-postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/postgres?sslmode=require
+postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5433/[POSTGRES_DB]?sslmode=require
+```
+
+**Direct connection (bypasses proxy — use only for read replicas or diagnostics):**
+```
+Host: flux{COMPONENT_NAME}_{APPNAME}
+Port: 5432
+Database: [POSTGRES_DB]
+Username: postgres
+Password: [POSTGRES_SUPERUSER_PASSWORD]
+
+postgresql://postgres:[PASSWORD]@flux{PG_COMPONENT_NAME}_{APPNAME}:5432/[POSTGRES_DB]
 ```
 
 **For external connections (from host machine or remote clients):**
 ```
-Host: localhost (or server IP)
-Port: [HOST_POSTGRES_PORT] (default: 5432)
-Database: postgres
-Username: postgres
-Password: [POSTGRES_SUPERUSER_PASSWORD]
+# Via proxy (recommended for writes):
+postgresql://postgres:[PASSWORD]@localhost:[HOST_PROXY_PORT]/[POSTGRES_DB]
+# e.g. if mapped to 15433: postgresql://postgres:[PASSWORD]@localhost:15433/[POSTGRES_DB]
 
-Example connection string:
-postgresql://postgres:[PASSWORD]@localhost:5432/postgres
-
-# With SSL enabled:
-postgresql://postgres:[PASSWORD]@localhost:5432/postgres?sslmode=require
+# Direct to a node (read-only or diagnostics):
+postgresql://postgres:[PASSWORD]@localhost:[HOST_POSTGRES_PORT]/[POSTGRES_DB]
+# e.g. if mapped to 15432: postgresql://postgres:[PASSWORD]@localhost:15432/[POSTGRES_DB]
 ```
 
-**For local testing with multiple nodes:**
-- Node 1: `postgresql://postgres:[PASSWORD]@localhost:5432/postgres`
-- Node 2: `postgresql://postgres:[PASSWORD]@localhost:5433/postgres`
-- Node 3: `postgresql://postgres:[PASSWORD]@localhost:5434/postgres`
+**For local testing with multiple nodes** (using `docker-compose.yml` default mappings):
+- Node 1 proxy (routes to primary): `postgresql://postgres:[PASSWORD]@localhost:5435/postgres`
+- Node 1 direct: `postgresql://postgres:[PASSWORD]@localhost:5432/postgres`
+- Node 2 direct: `postgresql://postgres:[PASSWORD]@localhost:5433/postgres`
+- Node 3 direct: `postgresql://postgres:[PASSWORD]@localhost:5434/postgres`
 
 **With SSL enabled, add `?sslmode=require` to any connection string above.**
 
@@ -225,12 +258,11 @@ Access the Patroni REST API at `http://localhost:8008` to:
 
 ## Files Overview
 
-- **Dockerfile**: Multi-stage build for the cluster image
+- **Dockerfile**: Multi-stage build — Go binary compiled inside Docker, no local Go toolchain needed
 - **docker-compose.yml**: Service definition with networking and volumes
-- **entrypoint.sh**: Initial setup script that discovers and configures the cluster
 - **patroni.yml.tpl**: Template for Patroni configuration
-- **update-cluster.sh**: Background daemon for maintaining cluster membership
-- **supervisord.conf**: Process management configuration
+- **supervisord.conf**: Process management configuration (etcd, patroni, updater, proxy)
+- **cmd/flux-agent/**: Go source for the agent binary (init, daemon, etcd bootstrap, proxy)
 
 ### Local Testing
 
@@ -243,7 +275,8 @@ For local development and testing, this repository includes a complete mock envi
 
 2. **Access local services**:
    - **Mock Flux API**: http://localhost:8080
-   - **PostgreSQL nodes**:
+   - **Primary-routing proxy** (node 1): `localhost:5435` → always connects to current primary
+   - **PostgreSQL direct** (per-node):
      - Node 1: `localhost:5432`
      - Node 2: `localhost:5433`
      - Node 3: `localhost:5434`
@@ -252,9 +285,12 @@ For local development and testing, this repository includes a complete mock envi
 
 3. **Connect to PostgreSQL**:
    ```bash
-   # Default credentials from .env
-   psql -h localhost -p 5432 -U postgres
+   # Via proxy — always goes to primary (recommended):
+   psql -h localhost -p 5435 -U postgres
    # Password: supersecretpassword
+
+   # Direct to node 1:
+   psql -h localhost -p 5432 -U postgres
    ```
 
 The local setup includes:
@@ -307,4 +343,5 @@ Check logs for each component:
 /var/log/supervisor/patroni.out.log
 /var/log/supervisor/etcd.out.log
 /var/log/supervisor/updater.out.log
+/var/log/supervisor/proxy.out.log
 ```
