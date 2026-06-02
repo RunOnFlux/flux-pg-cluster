@@ -23,43 +23,43 @@ type Config struct {
 	PostgresSuperuserPassword   string
 	PostgresReplicationPassword string
 
-	SSLEnabled           bool
-	SSLPassphrase        string
-	SSLCertValidityDays  int
+	SSLEnabled          bool
+	SSLPassphrase       string
+	SSLCertValidityDays int
 
-	HostPostgresPort    int
-	HostPatroniAPIPort  int
-	HostEtcdClientPort  int
-	HostEtcdPeerPort    int
-	PostgresPort        int
-	PatroniAPIPort      int
-	EtcdClientPort      int
-	EtcdPeerPort        int
+	HostPostgresPort   int
+	HostPatroniAPIPort int
+	HostEtcdClientPort int
+	HostEtcdPeerPort   int
+	PostgresPort       int
+	PatroniAPIPort     int
+	EtcdClientPort     int
+	EtcdPeerPort       int
 
-	EtcdHosts           string // comma-separated IP:port pairs (no scheme)
-	EtcdInitialCluster  string // comma-separated name=URL pairs
-	ClusterIPs          []string
+	EtcdHosts          string // comma-separated IP:port pairs (no scheme)
+	EtcdInitialCluster string // comma-separated name=URL pairs
+	ClusterIPs         []string
 
-	AllowNewClusterBootstrap     bool
-	AllowAnyNodeBootstrap        bool
-	AutoBootstrapIfFresh         bool
-	DeadClusterRecovery          bool
-	EtcdJoinMaxRetries           int
-	EtcdJoinRetryDelaySeconds    int
-	UpdateIntervalSeconds        int
-	DesiredStateStabilityCycles  int
+	AllowNewClusterBootstrap      bool
+	AllowAnyNodeBootstrap         bool
+	AutoBootstrapIfFresh          bool
+	DeadClusterRecovery           bool
+	EtcdJoinMaxRetries            int
+	EtcdJoinRetryDelaySeconds     int
+	UpdateIntervalSeconds         int
+	DesiredStateStabilityCycles   int
 	EtcdUnavailableRecoveryCycles int
 
-	PatroniTTL                  int
-	PatroniLoopWait             int
-	PatroniRetryTimeout         int
-	PatroniMaxLag               int
-	PatroniMasterStartTimeout   int
-	PatroniMasterStopTimeout    int
-	PatroniUseSlots             bool
-	PatroniSynchronousMode      bool
+	PatroniTTL                   int
+	PatroniLoopWait              int
+	PatroniRetryTimeout          int
+	PatroniMaxLag                int
+	PatroniMasterStartTimeout    int
+	PatroniMasterStopTimeout     int
+	PatroniUseSlots              bool
+	PatroniSynchronousMode       bool
 	PatroniSynchronousModeStrict bool
-	PatroniSynchronousNodeCount int
+	PatroniSynchronousNodeCount  int
 
 	FluxAPIURL string
 

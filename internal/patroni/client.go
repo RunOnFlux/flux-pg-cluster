@@ -92,10 +92,10 @@ type ClusterInfo struct {
 }
 
 type ClusterMember struct {
-	Name string `json:"name"`
-	Role string `json:"role"`
-	Host string `json:"host"`
-	Port int    `json:"port"`
+	Name  string `json:"name"`
+	Role  string `json:"role"`
+	Host  string `json:"host"`
+	Port  int    `json:"port"`
 	State string `json:"state"`
 }
 

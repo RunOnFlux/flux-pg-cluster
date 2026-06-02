@@ -11,23 +11,23 @@ import (
 	"time"
 
 	"github.com/RunOnFlux/flux-pg-cluster/internal/config"
-	"github.com/RunOnFlux/flux-pg-cluster/internal/etcdmgr"
 	myerrors "github.com/RunOnFlux/flux-pg-cluster/internal/errors"
+	"github.com/RunOnFlux/flux-pg-cluster/internal/etcdmgr"
 	pkglog "github.com/RunOnFlux/flux-pg-cluster/internal/log"
 )
 
 // runEtcdStart implements the state machine from start-etcd.sh:
 //
-//   1. Load cluster_env
-//   2. If data directory exists:
-//      a. Fast peer check — if any peer reachable, wipe local data (avoids
-//         disrupting running cluster) and force rejoin via member add.
-//      b. If no peers reachable, validate local data with temp etcd; if
-//         cluster-ID mismatch, wipe; otherwise start as existing.
-//   3. If no data (or wiped): try to join existing cluster via member add.
-//   4. If no peers, bootstrap new cluster (with safety guards).
-//   5. Finally exec etcd with the resolved CLUSTER_STATE (and --force-new-cluster
-//      if the flag file is present).
+//  1. Load cluster_env
+//  2. If data directory exists:
+//     a. Fast peer check — if any peer reachable, wipe local data (avoids
+//     disrupting running cluster) and force rejoin via member add.
+//     b. If no peers reachable, validate local data with temp etcd; if
+//     cluster-ID mismatch, wipe; otherwise start as existing.
+//  3. If no data (or wiped): try to join existing cluster via member add.
+//  4. If no peers, bootstrap new cluster (with safety guards).
+//  5. Finally exec etcd with the resolved CLUSTER_STATE (and --force-new-cluster
+//     if the flag file is present).
 func runEtcdStart(args []string) {
 	fs := flag.NewFlagSet("etcd-start", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "/var/lib/etcd", "etcd data directory")

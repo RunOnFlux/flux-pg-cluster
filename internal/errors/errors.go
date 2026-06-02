@@ -15,11 +15,11 @@ func NewSplitBrainRisk() error   { return splitBrainRisk{} }
 func NewNoPeersReachable() error { return noPeersReachable{} }
 
 func IsSplitBrainRisk(err error) bool {
-var s splitBrainRisk
-return errors.As(err, &s)
+	var s splitBrainRisk
+	return errors.As(err, &s)
 }
 
 func IsNoPeersReachable(err error) bool {
-var n noPeersReachable
-return errors.As(err, &n)
+	var n noPeersReachable
+	return errors.As(err, &n)
 }

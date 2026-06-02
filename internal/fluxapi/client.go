@@ -21,8 +21,8 @@ type Client struct {
 type appLocationResp struct {
 	Status string `json:"status"`
 	Data   []struct {
-		IP    string `json:"ip"`
-		Name  string `json:"name"`
+		IP    string          `json:"ip"`
+		Name  string          `json:"name"`
 		Ports json.RawMessage `json:"ports"`
 	} `json:"data"`
 }
