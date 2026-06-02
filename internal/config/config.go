@@ -63,8 +63,9 @@ type Config struct {
 	FluxAPIURL string
 
 	// Proxy
-	ProxyListenPort      int
-	ProxyHealthInterval  int
+	ProxyEnabled        bool
+	ProxyListenPort     int
+	ProxyHealthInterval int
 }
 
 func env(key, def string) string {
@@ -132,6 +133,7 @@ func FromEnv() *Config {
 		PatroniSynchronousModeStrict:  envBool("PATRONI_SYNCHRONOUS_MODE_STRICT", false),
 		PatroniSynchronousNodeCount:   envInt("PATRONI_SYNCHRONOUS_NODE_COUNT", 1),
 		FluxAPIURL:                    env("FLUX_API_URL", "https://api.runonflux.io"),
+		ProxyEnabled:                  envBool("PROXY_ENABLED", true),
 		ProxyListenPort:               envInt("PROXY_LISTEN_PORT", 5433),
 		ProxyHealthInterval:           envInt("PROXY_HEALTH_INTERVAL_SECONDS", 3),
 	}

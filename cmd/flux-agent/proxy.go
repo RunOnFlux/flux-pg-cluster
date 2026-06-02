@@ -34,6 +34,11 @@ func runProxy(args []string) {
 		pkglog.Warnf("proxy: could not load %s (will rely on env): %v", config.ClusterEnvFile, err)
 	}
 
+	if !cfg.ProxyEnabled {
+		pkglog.Infof("proxy: PROXY_ENABLED=false — skipping proxy startup")
+		return
+	}
+
 	if *listenAddr == "" {
 		*listenAddr = fmt.Sprintf(":%d", cfg.ProxyListenPort)
 	}
