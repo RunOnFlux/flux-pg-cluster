@@ -119,7 +119,7 @@ func FromEnv() *Config {
 		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", true),
 		EtcdJoinMaxRetries:            envInt("ETCD_JOIN_MAX_RETRIES", 12),
 		EtcdJoinRetryDelaySeconds:     envInt("ETCD_JOIN_RETRY_DELAY_SECONDS", 10),
-		UpdateIntervalSeconds:         envInt("UPDATE_INTERVAL_SECONDS", 300),
+		UpdateIntervalSeconds:         envInt("UPDATE_INTERVAL_SECONDS", 60),
 		DesiredStateStabilityCycles:   envInt("DESIRED_STATE_STABILITY_CYCLES", 3),
 		EtcdUnavailableRecoveryCycles: envInt("ETCD_UNAVAILABLE_RECOVERY_CYCLES", 2),
 		PatroniTTL:                    envInt("PATRONI_TTL", 30),
