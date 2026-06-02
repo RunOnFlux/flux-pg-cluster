@@ -205,29 +205,42 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	// Stale Patroni leader cleanup
 	checkStalePatroniLeader(cfg, ec)
 
-	// 6. Reconcile membership (only when state is stable)
+	// 6. Reconcile membership
+	// Members not in the Flux API are removed:
+	//   - Immediately if they are also unreachable (departed node — no reason to wait)
+	//   - After state stability if they are still reachable (safety gate against transient API errors)
 	currentMembers := membersIPs(members, cfg.HostEtcdClientPort)
 	pkglog.Infof("current etcd members: %v", currentMembers)
-	if !stable {
-		pkglog.Infof("state not stable — skipping membership changes")
-		return
+
+	for _, current := range currentMembers {
+		if containsString(desiredIPs, current) {
+			continue
+		}
+		reachable := isPeerReachable(cfg, sslOpts, current)
+		if !stable && reachable {
+			pkglog.Infof("member %s not in desired state but still reachable and state not yet stable — skipping", current)
+			continue
+		}
+		if !reachable {
+			pkglog.Infof("member %s not in desired state AND unreachable — removing immediately", current)
+		} else {
+			pkglog.Infof("member %s NOT in desired state — removing (stable)", current)
+		}
+		m := etcdmgr.FindByClientIP(members, fmt.Sprintf("%s:%d", current, cfg.HostEtcdClientPort))
+		if m != nil && m.ID != "" {
+			rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := ec.MemberRemove(rctx, m.ID); err != nil {
+				pkglog.Warnf("remove %s (%s): %v", current, m.ID, err)
+			} else {
+				pkglog.Infof("removed %s (id=%s)", current, m.ID)
+			}
+			rcancel()
+		}
 	}
 
-	// Remove members not in desired
-	for _, current := range currentMembers {
-		if !containsString(desiredIPs, current) {
-			pkglog.Infof("member %s NOT in desired state — removing", current)
-			m := etcdmgr.FindByClientIP(members, fmt.Sprintf("%s:%d", current, cfg.HostEtcdClientPort))
-			if m != nil && m.ID != "" {
-				rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
-				if err := ec.MemberRemove(rctx, m.ID); err != nil {
-					pkglog.Warnf("remove %s (%s): %v", current, m.ID, err)
-				} else {
-					pkglog.Infof("removed %s (id=%s)", current, m.ID)
-				}
-				rcancel()
-			}
-		}
+	if !stable {
+		pkglog.Infof("state not stable — skipping env update")
+		return
 	}
 
 	// New members will self-add when they start up; just update env file
@@ -364,6 +377,16 @@ func triggerForceNewCluster(cfg *config.Config, ec *etcdmgr.Client, flagFile, co
 	_ = ec.RMRecursive(ctx2, "/patroni/postgres-cluster/members")
 	cancel2()
 	pkglog.Infof("quorum recovery complete — new nodes can now join")
+}
+
+// isPeerReachable returns true if the etcd client endpoint on ip responds within 3 seconds.
+func isPeerReachable(cfg *config.Config, sslOpts []string, ip string) bool {
+	endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
+	ec := etcdmgr.New(endpoint, sslOpts)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, err := ec.MemberList(ctx)
+	return err == nil
 }
 
 func evaluatePeerVotes(cfg *config.Config, sslOpts, desiredIPs []string) (reachable, matching, mismatched int) {
