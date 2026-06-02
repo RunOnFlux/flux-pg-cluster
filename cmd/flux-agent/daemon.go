@@ -90,7 +90,10 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	pkglog.Infof("desired IPs (%d): %v — stable=%v (%d/%d)", len(desiredIPs), desiredIPs, stable, stableCount, cfg.DesiredStateStabilityCycles)
 
 	// 2. Probe local etcd health (write-quorum probe)
-	localEndpoint := fmt.Sprintf("%s://127.0.0.1:%d", cfg.EtcdProtocol(), cfg.HostEtcdClientPort)
+	// Local etcd listens on ETCD_CLIENT_PORT (container-internal port).
+	// Use the external IP with HOST_ETCD_CLIENT_PORT as a fallback — etcd
+	// also binds 0.0.0.0, so the external IP works from inside the container.
+	localEndpoint := fmt.Sprintf("%s://127.0.0.1:%d", cfg.EtcdProtocol(), cfg.EtcdClientPort)
 	externalEndpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), cfg.MyIP, cfg.HostEtcdClientPort)
 	endpoint := pickHealthyEtcdEndpoint(cfg, localEndpoint, externalEndpoint)
 
@@ -260,19 +263,9 @@ func pickHealthyEtcdEndpoint(cfg *config.Config, local, external string) string 
 }
 
 func etcdHealthReachable(endpoint string, cfg *config.Config) bool {
-	// Build /health URL: replace scheme://host:port → scheme://host:HOST_PORT/health
-	// For the local endpoint we want HOST_ETCD_CLIENT_PORT (mapped on localhost).
-	parts := strings.SplitN(endpoint, "://", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	scheme := parts[0]
-	hostport := parts[1]
-	host := hostport
-	if i := strings.LastIndex(hostport, ":"); i > 0 {
-		host = hostport[:i]
-	}
-	url := fmt.Sprintf("%s://%s:%d/health", scheme, host, cfg.HostEtcdClientPort)
+	// Append /health to the endpoint as-is; the port is already correct
+	// (EtcdClientPort for local, HostEtcdClientPort for external peers).
+	url := strings.TrimRight(endpoint, "/") + "/health"
 
 	tlsCfg := &tls.Config{InsecureSkipVerify: true} //nolint:gosec
 	if cfg.SSLEnabled {
