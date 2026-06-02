@@ -78,6 +78,12 @@ func (c *Client) SetWithTTL(ctx context.Context, key, value string, ttlSecs int)
 	return err
 }
 
+// Set sets a key to a value without a TTL (permanent key).
+func (c *Client) Set(ctx context.Context, key, value string) error {
+	_, err := c.run(ctx, 5*time.Second, "set", key, value)
+	return err
+}
+
 // Get retrieves a key's value.
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
 	return c.run(ctx, 5*time.Second, "get", key)

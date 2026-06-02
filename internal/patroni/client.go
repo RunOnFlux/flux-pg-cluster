@@ -99,6 +99,36 @@ type ClusterMember struct {
 	State string `json:"state"`
 }
 
+// NodeInfo is the response from the Patroni /patroni endpoint.
+type NodeInfo struct {
+	Role                    string `json:"role"`
+	State                   string `json:"state"`
+	DatabaseSystemIdentifier string `json:"database_system_identifier"`
+}
+
+// GetInfo fetches the /patroni endpoint and returns the node info.
+// Returns nil if the endpoint is unreachable or returns an unexpected status.
+func (c *Client) GetInfo(ctx context.Context, ip string) (*NodeInfo, error) {
+	url := fmt.Sprintf("%s://%s:%d/patroni", c.Scheme, ip, c.Port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("patroni /patroni: status %d", resp.StatusCode)
+	}
+	var info NodeInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
 // Cluster fetches /cluster from the given Patroni endpoint.
 func (c *Client) Cluster(ctx context.Context, ip string) (*ClusterInfo, error) {
 	url := fmt.Sprintf("%s://%s:%d/cluster", c.Scheme, ip, c.Port)

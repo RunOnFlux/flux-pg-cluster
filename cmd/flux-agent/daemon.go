@@ -208,6 +208,16 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	// Stale Patroni leader cleanup
 	checkStalePatroniLeader(cfg, ec)
 
+	// Patroni system ID mismatch self-healing.
+	// If the etcd /initialize key doesn't match the running primary's system ID,
+	// the cluster is in a split-identity state (e.g. after a dead-cluster recovery
+	// where one node briefly bootstrapped a fresh PG then yielded to an existing
+	// primary). Fix: update the etcd key to the primary's authoritative system ID
+	// so replicas with the correct data can rejoin without wiping.
+	// If this node's local PG data has a mismatched system ID (and a healthy
+	// primary exists), wipe local data so Patroni will pg_basebackup fresh.
+	checkPatroniSystemID(cfg, ec, desiredIPs)
+
 	// 6. Reconcile membership
 	// Members not in the Flux API are removed:
 	//   - Immediately if they are also unreachable (departed node — no reason to wait)
@@ -426,6 +436,123 @@ func checkStalePatroniLeader(cfg *config.Config, ec *etcdmgr.Client) {
 	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	_ = ec.RM(rctx, "/patroni/postgres-cluster/leader")
 	rcancel()
+}
+
+// checkPatroniSystemID detects and heals two related split-identity scenarios:
+//
+//  1. The etcd /initialize key doesn't match the running primary's system ID
+//     (e.g. after a dead-cluster recovery where one node briefly bootstrapped a
+//     fresh PG, set /initialize, then yielded to a surviving primary with an
+//     older system ID). Action: update /initialize to the primary's system ID so
+//     replicas with matching data can rejoin without wiping.
+//
+//  2. This node's local PG data has a system ID that doesn't match /initialize
+//     AND there is a healthy primary. The data is from the wrong cluster epoch.
+//     Action: wipe local PG data and restart Patroni so it pg_basebackup.
+func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []string) {
+	initKey := fmt.Sprintf("/patroni/%s/initialize", cfg.AppName)
+
+	// Read the etcd cluster-initialize system identifier.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	etcdSysID, err := ec.Get(ctx, initKey)
+	cancel()
+	if err != nil || etcdSysID == "" {
+		// Not yet initialised — nothing to heal.
+		return
+	}
+
+	// Find a primary among desired peers and get its system ID.
+	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
+	primarySysID := ""
+	primaryIP := ""
+	for _, ip := range desiredIPs {
+		ictx, icancel := context.WithTimeout(context.Background(), 5*time.Second)
+		info, infoErr := pc.GetInfo(ictx, ip)
+		icancel()
+		if infoErr != nil || info == nil {
+			continue
+		}
+		if info.Role == "primary" && info.DatabaseSystemIdentifier != "" {
+			primarySysID = info.DatabaseSystemIdentifier
+			primaryIP = ip
+			break
+		}
+	}
+
+	if primarySysID == "" {
+		// No reachable primary — cannot make authoritative decisions.
+		return
+	}
+
+	// Case 1: etcd /initialize key is stale (doesn't match the running primary).
+	if etcdSysID != primarySysID {
+		pkglog.Warnf("system ID mismatch: etcd /initialize=%s but primary %s reports %s — updating initialize key",
+			etcdSysID, primaryIP, primarySysID)
+		uctx, ucancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = ec.Set(uctx, initKey, primarySysID)
+		ucancel()
+		// Refresh etcdSysID for case 2 below.
+		etcdSysID = primarySysID
+	}
+
+	// Case 2: local PG data has a system ID from a different cluster epoch.
+	// Only attempt if we are NOT the primary and PG data actually exists.
+	if cfg.MyIP == primaryIP {
+		return
+	}
+	if !dirExists("/var/lib/postgresql/data/global") {
+		return
+	}
+	localSysID, localErr := readLocalPGSystemID()
+	if localErr != nil {
+		pkglog.Infof("could not read local PG system ID: %v", localErr)
+		return
+	}
+	if localSysID == etcdSysID {
+		return
+	}
+	pkglog.Warnf("local PG system ID %s != cluster system ID %s — wiping data for clean pg_basebackup",
+		localSysID, etcdSysID)
+	supervisorctl("stop", "patroni")
+	if err := wipeDir("/var/lib/postgresql/data"); err != nil {
+		pkglog.Errorf("failed to wipe PG data: %v", err)
+		return
+	}
+	supervisorctl("start", "patroni")
+}
+
+// readLocalPGSystemID reads the PostgreSQL system identifier from pg_controldata.
+func readLocalPGSystemID() (string, error) {
+	// Find pg_controldata across common PostgreSQL versions.
+	candidates := []string{
+		"/usr/lib/postgresql/16/bin/pg_controldata",
+		"/usr/lib/postgresql/15/bin/pg_controldata",
+		"/usr/lib/postgresql/14/bin/pg_controldata",
+		"/usr/lib/postgresql/13/bin/pg_controldata",
+	}
+	var pgCtl string
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			pgCtl = c
+			break
+		}
+	}
+	if pgCtl == "" {
+		return "", fmt.Errorf("pg_controldata not found")
+	}
+	out, err := exec.Command(pgCtl, "/var/lib/postgresql/data").Output()
+	if err != nil {
+		return "", fmt.Errorf("pg_controldata: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "Database system identifier") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1]), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("system identifier not found in pg_controldata output")
 }
 
 func membersIPs(members []etcdmgr.Member, clientPort int) []string {
