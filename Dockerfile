@@ -13,8 +13,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
     postgresql-14 \
     postgresql-client-14 \
-    etcd-server \
-    etcd-client \
     curl \
     jq \
     python3 \
@@ -33,7 +31,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
-RUN pip3 install patroni[etcd] psycopg2-binary cryptography
+RUN pip3 install 'patroni[etcd3]' psycopg2-binary cryptography
 
 # Create necessary directories
 RUN mkdir -p /etc/patroni /app /var/log/supervisor /var/lib/postgresql/data /etc/ssl/cluster/{ca,etcd,postgres,patroni}
@@ -50,6 +48,9 @@ COPY post_bootstrap.sh /app/post_bootstrap.sh
 COPY diagnose.sh /app/diagnose.sh
 COPY generate-certs.sh /app/generate-certs.sh
 COPY VERSION /app/VERSION
+
+# Copy etcd 3.5 binaries (pre-downloaded to avoid build-time internet dependency)
+COPY bin/etcd bin/etcdctl /usr/local/bin/
 
 # Copy Go binary
 COPY --from=gobuild /out/flux-agent /app/flux-agent

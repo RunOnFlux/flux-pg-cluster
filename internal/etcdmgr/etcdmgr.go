@@ -1,13 +1,13 @@
-// Package etcdmgr wraps the v2 etcdctl binary to manage cluster membership.
-// We shell out to etcdctl rather than using the Go client library because the
-// existing scripts use v2 API output formatting (no name= for unstarted, etc.)
-// and exact output parity simplifies side-by-side validation.
+// Package etcdmgr wraps the etcdctl v3 binary to manage cluster membership.
+// We shell out to etcdctl (ETCDCTL_API=3) rather than using the Go client
+// library to keep the binary self-contained without a gRPC dependency.
 package etcdmgr
 
 import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -19,14 +19,15 @@ type Member struct {
 	Name       string // empty for unstarted (ghost) members
 	PeerURLs   string
 	ClientURLs string
-	IsLeader   bool
+	IsLeader   bool // NOTE: not available in etcd v3.5 CSV member list output
+	IsLearner  bool
 	Unstarted  bool
 }
 
 // Client wraps etcdctl with SSL options and an endpoint.
 type Client struct {
 	Endpoint string
-	SSLOpts  []string // e.g. ["--cert-file=...", "--key-file=...", "--ca-file=..."]
+	SSLOpts  []string // e.g. ["--cert=...", "--key=...", "--cacert=..."]
 }
 
 // New creates a client for the given endpoint with optional SSL options.
@@ -34,14 +35,15 @@ func New(endpoint string, sslOpts []string) *Client {
 	return &Client{Endpoint: endpoint, SSLOpts: sslOpts}
 }
 
-// run executes etcdctl with the given args and returns stdout (trimmed).
+// run executes etcdctl (v3 API) with the given args and returns stdout (trimmed).
 func (c *Client) run(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
 	full := append([]string{}, c.SSLOpts...)
-	full = append(full, "--endpoints="+c.Endpoint, "--timeout="+timeout.String())
+	full = append(full, "--endpoints="+c.Endpoint, "--dial-timeout="+timeout.String())
 	full = append(full, args...)
 	cctx, cancel := context.WithTimeout(ctx, timeout+5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "etcdctl", full...)
+	cmd.Env = append(os.Environ(), "ETCDCTL_API=3")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -60,9 +62,23 @@ func (c *Client) MemberList(ctx context.Context) ([]Member, error) {
 	return ParseMemberList(out), nil
 }
 
-// MemberAdd registers a new peer with the cluster.
+// MemberAdd registers a new peer as a full voting member.
 func (c *Client) MemberAdd(ctx context.Context, name, peerURL string) error {
-	_, err := c.run(ctx, 10*time.Second, "member", "add", name, peerURL)
+	_, err := c.run(ctx, 10*time.Second, "member", "add", name, "--peer-urls="+peerURL)
+	return err
+}
+
+// MemberAddLearner registers a new peer as a non-voting learner.
+// The learner replicates data without counting toward quorum until promoted.
+func (c *Client) MemberAddLearner(ctx context.Context, name, peerURL string) error {
+	_, err := c.run(ctx, 10*time.Second, "member", "add", name, "--peer-urls="+peerURL, "--learner")
+	return err
+}
+
+// MemberPromote promotes a learner member to a full voting member.
+// Returns an error if the learner is not yet in sync with the leader.
+func (c *Client) MemberPromote(ctx context.Context, id string) error {
+	_, err := c.run(ctx, 10*time.Second, "member", "promote", id)
 	return err
 }
 
@@ -72,38 +88,54 @@ func (c *Client) MemberRemove(ctx context.Context, id string) error {
 	return err
 }
 
-// SetWithTTL sets a key with a TTL (seconds). Used as a write-quorum probe.
+// SetWithTTL sets a key with a TTL via a lease. Used as a write-quorum probe.
 func (c *Client) SetWithTTL(ctx context.Context, key, value string, ttlSecs int) error {
-	_, err := c.run(ctx, 5*time.Second, "set", key, value, "--ttl", fmt.Sprintf("%d", ttlSecs))
+	out, err := c.run(ctx, 5*time.Second, "lease", "grant", fmt.Sprintf("%d", ttlSecs))
+	if err != nil {
+		return err
+	}
+	// Output: "lease 694d5765fc15afcd granted with TTL(1s)"
+	parts := strings.Fields(out)
+	if len(parts) < 2 {
+		return fmt.Errorf("unexpected lease grant output: %s", out)
+	}
+	leaseID := parts[1]
+	_, err = c.run(ctx, 5*time.Second, "put", "--lease="+leaseID, key, value)
 	return err
 }
 
 // Set sets a key to a value without a TTL (permanent key).
 func (c *Client) Set(ctx context.Context, key, value string) error {
-	_, err := c.run(ctx, 5*time.Second, "set", key, value)
+	_, err := c.run(ctx, 5*time.Second, "put", key, value)
 	return err
 }
 
-// Get retrieves a key's value.
+// Get retrieves a key's value. Returns ("", nil) if the key does not exist.
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
-	return c.run(ctx, 5*time.Second, "get", key)
+	out, err := c.run(ctx, 5*time.Second, "get", "--print-value-only", key)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
-// RM removes a key (single).
+// RM removes a single key.
 func (c *Client) RM(ctx context.Context, key string) error {
-	_, err := c.run(ctx, 5*time.Second, "rm", key)
+	_, err := c.run(ctx, 5*time.Second, "del", key)
 	return err
 }
 
-// RMRecursive removes a key recursively.
-func (c *Client) RMRecursive(ctx context.Context, key string) error {
-	_, err := c.run(ctx, 5*time.Second, "rm", "--recursive", key)
+// RMRecursive removes all keys with the given prefix.
+func (c *Client) RMRecursive(ctx context.Context, prefix string) error {
+	_, err := c.run(ctx, 5*time.Second, "del", "--prefix", prefix)
 	return err
 }
 
-// ParseMemberList parses etcdctl v2 member list output into Member structs.
-// Active line:    "7d0225fa214aabdb: name=node-1 peerURLs=https://1.2.3.4:2380 clientURLs=https://1.2.3.4:2379 isLeader=true"
-// Unstarted line: "98583ded33e2a2c[unstarted]: peerURLs=https://1.2.3.5:2380 clientURLs="
+// ParseMemberList parses etcdctl v3 member list output into Member structs.
+// etcd v3.5 CSV format has 6 fields (no IsLeader column):
+//
+//	"<hex-id>, started,   <name>, <peerURLs>, <clientURLs>, <isLearner>"
+//	"<hex-id>, unstarted,       , <peerURLs>,             ,       false"
 func ParseMemberList(output string) []Member {
 	var members []Member
 	for _, line := range strings.Split(output, "\n") {
@@ -111,38 +143,30 @@ func ParseMemberList(output string) []Member {
 		if line == "" {
 			continue
 		}
-		idx := strings.Index(line, ":")
-		if idx < 0 {
+		// Split into at most 6 fields on ", "
+		fields := strings.SplitN(line, ", ", 6)
+		if len(fields) < 2 {
 			continue
 		}
-		idPart := strings.TrimSpace(line[:idx])
-		rest := strings.TrimSpace(line[idx+1:])
-
 		m := Member{}
-		if strings.HasSuffix(idPart, "[unstarted]") {
-			m.Unstarted = true
-			idPart = strings.TrimSuffix(idPart, "[unstarted]")
+		m.ID = strings.TrimSpace(fields[0])
+		status := strings.TrimSpace(fields[1])
+		m.Unstarted = status == "unstarted"
+		if len(fields) > 2 {
+			m.Name = strings.TrimSpace(fields[2])
 		}
-		m.ID = idPart
-
-		for _, tok := range strings.Fields(rest) {
-			if k, v, ok := strings.Cut(tok, "="); ok {
-				switch k {
-				case "name":
-					m.Name = v
-				case "peerURLs":
-					m.PeerURLs = v
-				case "clientURLs":
-					m.ClientURLs = v
-				case "isLeader":
-					m.IsLeader = strings.EqualFold(v, "true")
-				}
+		if len(fields) > 3 {
+			m.PeerURLs = strings.TrimSpace(fields[3])
+		}
+		if len(fields) > 4 {
+			m.ClientURLs = strings.TrimSpace(fields[4])
+			if m.ClientURLs == "" {
+				m.Unstarted = true
 			}
 		}
-
-		// Treat empty clientURLs as ghost regardless of [unstarted] marker
-		if m.ClientURLs == "" {
-			m.Unstarted = true
+		// Field 5 is IsLearner (etcd v3.5 dropped IsLeader from CSV output).
+		if len(fields) > 5 {
+			m.IsLearner = strings.EqualFold(strings.TrimSpace(fields[5]), "true")
 		}
 		members = append(members, m)
 	}

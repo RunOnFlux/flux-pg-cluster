@@ -224,31 +224,65 @@ class ClusterManager:
         for node_name in list(self.dynamic_nodes):
             self.remove_fresh_node(node_name)
 
-    def etcd_cmd(self, node_name: str, *args: str) -> str:
-        """Run an etcdctl command inside a container and return stdout."""
+    def etcd_cmd(self, node_name: str, *args: str, retries: int = 5, retry_delay: float = 3.0) -> str:
+        """Run an etcdctl v3 command inside a container and return stdout.
+
+        Retries on transient deadline-exceeded errors that can occur when etcd
+        is still bootstrapping or electing a leader (typically within the first
+        ~30 seconds after cluster start).
+        """
         cfg = self._config_for(node_name)
         container = self._container(node_name)
-        # SSL cert paths match etcdSSLOpts() in the Go agent.
         ssl_flags = [
-            "--cert-file=/etc/ssl/cluster/etcd/client.crt",
-            "--key-file=/etc/ssl/cluster/etcd/client.key",
-            "--ca-file=/etc/ssl/cluster/ca/ca.crt",
+            "--cert=/etc/ssl/cluster/etcd/client.crt",
+            "--key=/etc/ssl/cluster/etcd/client.key",
+            "--cacert=/etc/ssl/cluster/ca/ca.crt",
         ]
         endpoint = f"https://127.0.0.1:{cfg.etcd_client_port}"
-        cmd = ["etcdctl", "--endpoints", endpoint] + ssl_flags + list(args)
-        exit_code, output = container.exec_run(cmd)
-        result = output.decode().strip() if output else ""
-        if exit_code != 0:
-            raise RuntimeError(f"etcdctl {args} on {node_name} failed (exit {exit_code}): {result}")
-        return result
+        # Use longer timeouts than the etcdctl defaults (dial=2s, cmd=5s) to
+        # avoid spurious failures on loaded CI hosts.
+        cmd = (
+            ["etcdctl", "--endpoints", endpoint, "--dial-timeout=10s", "--command-timeout=15s"]
+            + ssl_flags
+            + list(args)
+        )
+        env = {"ETCDCTL_API": "3"}
+        last_err: Optional[RuntimeError] = None
+        for attempt in range(retries):
+            exit_code, output = container.exec_run(cmd, environment=env)
+            result = output.decode().strip() if output else ""
+            if exit_code == 0:
+                return result
+            last_err = RuntimeError(f"etcdctl {args} on {node_name} failed (exit {exit_code}): {result}")
+            if attempt < retries - 1 and "deadline exceeded" in result.lower():
+                time.sleep(retry_delay)
+                continue
+            raise last_err
+        raise last_err  # unreachable but satisfies type checker
 
     def etcd_get(self, node_name: str, key: str) -> str:
-        """Read an etcd v2 key value from a container."""
-        return self.etcd_cmd(node_name, "get", key)
+        """Read an etcd v3 key value from a container."""
+        return self.etcd_cmd(node_name, "get", "--print-value-only", key)
 
     def etcd_set(self, node_name: str, key: str, value: str) -> None:
-        """Write an etcd v2 key value from a container."""
-        self.etcd_cmd(node_name, "set", key, value)
+        """Write an etcd v3 key value from a container."""
+        self.etcd_cmd(node_name, "put", key, value)
+
+    def wait_for_etcd_ready(self, node_name: str, timeout: int = 60) -> None:
+        """Block until etcd on node_name serves client gRPC requests.
+
+        wait_for_healthy only checks the Patroni HTTP+SQL path; this is needed
+        before any direct etcd_get/etcd_set call to avoid DeadlineExceeded
+        errors during the first few seconds after cluster startup.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                self.etcd_cmd(node_name, "endpoint", "health", retries=1)
+                return
+            except RuntimeError:
+                time.sleep(2)
+        raise TimeoutError(f"etcd on {node_name} not ready within {timeout}s")
 
     def get_pg_system_id(self, node_name: str) -> Optional[str]:
         """Return the PG database_system_identifier from the Patroni API."""

@@ -14,7 +14,7 @@ restapi:
   keyfile: /etc/ssl/cluster/patroni/server.key
   cafile: /etc/ssl/cluster/ca/ca.crt
 
-etcd:
+etcd3:
   hosts: __ETCD_HOSTS__
   protocol: __ETCD_PROTOCOL__
   cacert: /etc/ssl/cluster/ca/ca.crt

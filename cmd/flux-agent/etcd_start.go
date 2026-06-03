@@ -176,10 +176,11 @@ func etcdSSLOpts(cfg *config.Config) []string {
 	if !cfg.SSLEnabled {
 		return nil
 	}
+	// etcdctl v3 uses --cert/--key/--cacert (server binary still uses --cert-file etc.)
 	return []string{
-		"--cert-file=/etc/ssl/cluster/etcd/client.crt",
-		"--key-file=/etc/ssl/cluster/etcd/client.key",
-		"--ca-file=/etc/ssl/cluster/ca/ca.crt",
+		"--cert=/etc/ssl/cluster/etcd/client.crt",
+		"--key=/etc/ssl/cluster/etcd/client.key",
+		"--cacert=/etc/ssl/cluster/ca/ca.crt",
 	}
 }
 
@@ -334,22 +335,30 @@ func tryJoinExisting(cfg *config.Config, sslOpts, otherIPs []string, forceRejoin
 				}
 			}
 
-			pkglog.Infof("adding this node to the existing cluster via %s", ip)
+			pkglog.Infof("adding this node to the existing cluster as learner via %s", ip)
 			actx, acancel := context.WithTimeout(context.Background(), 10*time.Second)
-			err = ec.MemberAdd(actx, cfg.MyName, peerURL)
+			err = ec.MemberAddLearner(actx, cfg.MyName, peerURL)
 			acancel()
 			if err != nil {
-				pkglog.Warnf("member add via %s failed: %v", ip, err)
+				if strings.Contains(err.Error(), "too many learner members") {
+					// Another node is already syncing as a learner. etcd v3 allows
+					// only 1 learner at a time. Break the IP loop and retry after
+					// the delay — the existing learner should be promoted soon.
+					pkglog.Infof("another learner is already syncing — will retry after %s", delay)
+					anyReachable = true
+					break
+				}
+				pkglog.Warnf("member add-learner via %s failed: %v", ip, err)
 				continue
 			}
 
 			// Rebuild ETCD_INITIAL_CLUSTER from actual registered members so
-			// etcd v3.3 doesn't reject startup with "member count is unequal".
+			// etcd doesn't reject startup with "member count is unequal".
 			pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
 			updated, _ := ec.MemberList(pctx)
 			pcancel()
 			rebuilt := rebuildInitialCluster(updated, cfg.MyName, peerURL)
-			pkglog.Infof("successfully registered in existing cluster")
+			pkglog.Infof("successfully registered in existing cluster as learner")
 			return "existing", rebuilt, nil
 		}
 
