@@ -347,6 +347,7 @@ func renderPatroniConfig(in, out string, cfg *config.Config) error {
 		"__PATRONI_MASTER_START_TIMEOUT__":  strconv.Itoa(cfg.PatroniMasterStartTimeout),
 		"__PATRONI_MASTER_STOP_TIMEOUT__":   strconv.Itoa(cfg.PatroniMasterStopTimeout),
 		"__PATRONI_USE_SLOTS__":             strconv.FormatBool(cfg.PatroniUseSlots),
+		"__PATRONI_LOG_LEVEL__":             cfg.PatroniLogLevel,
 	}
 	s := string(data)
 	for k, v := range replacements {

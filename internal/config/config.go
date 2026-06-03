@@ -58,6 +58,7 @@ type Config struct {
 	PatroniMasterStartTimeout    int
 	PatroniMasterStopTimeout     int
 	PatroniUseSlots              bool
+	PatroniLogLevel              string
 	PatroniSynchronousMode       bool
 	PatroniSynchronousModeStrict bool
 	PatroniSynchronousNodeCount  int
@@ -133,6 +134,7 @@ func FromEnv() *Config {
 		PatroniMasterStartTimeout:     envInt("PATRONI_MASTER_START_TIMEOUT", 300),
 		PatroniMasterStopTimeout:      envInt("PATRONI_MASTER_STOP_TIMEOUT", 300),
 		PatroniUseSlots:               envBool("PATRONI_USE_SLOTS", false),
+		PatroniLogLevel:               env("PATRONI_LOG_LEVEL", "INFO"),
 		PatroniSynchronousMode:        envBool("PATRONI_SYNCHRONOUS_MODE", false),
 		PatroniSynchronousModeStrict:  envBool("PATRONI_SYNCHRONOUS_MODE_STRICT", false),
 		PatroniSynchronousNodeCount:   envInt("PATRONI_SYNCHRONOUS_NODE_COUNT", 1),
@@ -238,6 +240,8 @@ func (c *Config) applyKV(key, val string) {
 		c.PatroniMasterStopTimeout, _ = strconv.Atoi(val)
 	case "PATRONI_USE_SLOTS":
 		c.PatroniUseSlots = strings.EqualFold(val, "true")
+	case "PATRONI_LOG_LEVEL":
+		c.PatroniLogLevel = val
 	case "PATRONI_SYNCHRONOUS_MODE":
 		c.PatroniSynchronousMode = strings.EqualFold(val, "true")
 	case "PATRONI_SYNCHRONOUS_MODE_STRICT":
@@ -290,6 +294,7 @@ func (c *Config) WriteClusterEnv() error {
 		fmt.Sprintf("PATRONI_MASTER_START_TIMEOUT=%d", c.PatroniMasterStartTimeout),
 		fmt.Sprintf("PATRONI_MASTER_STOP_TIMEOUT=%d", c.PatroniMasterStopTimeout),
 		fmt.Sprintf("PATRONI_USE_SLOTS=%s", strconv.FormatBool(c.PatroniUseSlots)),
+		"PATRONI_LOG_LEVEL=" + c.PatroniLogLevel,
 	}
 	return os.WriteFile(ClusterEnvFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }

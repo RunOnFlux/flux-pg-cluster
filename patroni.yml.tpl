@@ -3,7 +3,7 @@ namespace: /patroni/
 name: __MY_NAME__
 
 log:
-  level: DEBUG
+  level: __PATRONI_LOG_LEVEL__
   format: '%(asctime)s %(levelname)s: %(message)s'
 
 restapi:
