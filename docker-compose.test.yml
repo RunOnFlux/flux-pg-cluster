@@ -1,0 +1,39 @@
+services:
+  mock-api:
+    image: flux-pg-cluster-mock-api:test
+    build:
+      context: ./mock-api
+    environment:
+      INITIAL_NODES_FILE: /data/myapp-postgres.json
+    volumes:
+      - ./mock-api/apps/location:/data:ro
+
+  postgres-node1:
+    environment:
+      UPDATE_INTERVAL_SECONDS: "15"
+      DESIRED_STATE_STABILITY_CYCLES: "2"
+      PATRONI_TTL: "15"
+      PATRONI_LOOP_WAIT: "5"
+      PATRONI_RETRY_TIMEOUT: "10"
+      PATRONI_MASTER_START_TIMEOUT: "60"
+      FNF_COOLDOWN_SECS: "120"
+
+  postgres-node2:
+    environment:
+      UPDATE_INTERVAL_SECONDS: "15"
+      DESIRED_STATE_STABILITY_CYCLES: "2"
+      PATRONI_TTL: "15"
+      PATRONI_LOOP_WAIT: "5"
+      PATRONI_RETRY_TIMEOUT: "10"
+      PATRONI_MASTER_START_TIMEOUT: "60"
+      FNF_COOLDOWN_SECS: "120"
+
+  postgres-node3:
+    environment:
+      UPDATE_INTERVAL_SECONDS: "15"
+      DESIRED_STATE_STABILITY_CYCLES: "2"
+      PATRONI_TTL: "15"
+      PATRONI_LOOP_WAIT: "5"
+      PATRONI_RETRY_TIMEOUT: "10"
+      PATRONI_MASTER_START_TIMEOUT: "60"
+      FNF_COOLDOWN_SECS: "120"

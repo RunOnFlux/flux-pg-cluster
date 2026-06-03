@@ -112,8 +112,12 @@ create_csr() {
         ip_sans="${ip_sans}IP:${ip}"
     done
 
-    # Skip adding node-specific MY_IP for truly deterministic certificates
-    # All nodes will have identical certificates with same SANs
+    # Always include this node's own IP — it may not be in CLUSTER_IPS if the node
+    # restarted while temporarily absent from the Flux API (e.g. rolling replacement).
+    # Without its own IP in the SAN, peers reject TLS connections to this node.
+    if ! echo "$ip_sans" | grep -qF "IP:${MY_IP}"; then
+        ip_sans="${ip_sans},IP:${MY_IP}"
+    fi
 
     # Add common localhost addresses
     ip_sans="${ip_sans},IP:127.0.0.1,IP:0.0.0.0"
@@ -151,8 +155,11 @@ sign_certificate() {
         ip_sans="${ip_sans}IP:${ip}"
     done
 
-    # Skip adding node-specific MY_IP for truly deterministic certificates
-    # All nodes will have identical certificates with same SANs
+    # Always include this node's own IP — it may not be in CLUSTER_IPS if the node
+    # restarted while temporarily absent from the Flux API (e.g. rolling replacement).
+    if ! echo "$ip_sans" | grep -qF "IP:${MY_IP}"; then
+        ip_sans="${ip_sans},IP:${MY_IP}"
+    fi
 
     # Add common localhost addresses
     ip_sans="${ip_sans},IP:127.0.0.1,IP:0.0.0.0"

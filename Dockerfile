@@ -1,3 +1,10 @@
+FROM golang:1.22 AS gobuild
+WORKDIR /src
+COPY go.mod ./
+RUN go mod download 2>/dev/null || true
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=$(cat VERSION)" -o /out/flux-agent ./cmd/flux-agent
+
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -36,24 +43,26 @@ RUN chown -R postgres:postgres /var/lib/postgresql
 RUN chmod 700 /var/lib/postgresql/data
 
 # Copy configuration templates and scripts
-COPY entrypoint.sh /app/entrypoint.sh
+# Legacy scripts retained for: certs generation (called from Go), diagnostics.
 COPY patroni.yml.tpl /app/patroni.yml.tpl
-COPY update-cluster.sh /app/update-cluster.sh
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY start-etcd.sh /app/start-etcd.sh
 COPY post_bootstrap.sh /app/post_bootstrap.sh
 COPY diagnose.sh /app/diagnose.sh
 COPY generate-certs.sh /app/generate-certs.sh
 COPY VERSION /app/VERSION
 
+# Copy Go binary
+COPY --from=gobuild /out/flux-agent /app/flux-agent
+
 # Make scripts executable
-RUN chmod +x /app/entrypoint.sh /app/update-cluster.sh /app/diagnose.sh /app/generate-certs.sh /app/start-etcd.sh /app/post_bootstrap.sh
+RUN chmod +x /app/diagnose.sh /app/generate-certs.sh /app/post_bootstrap.sh /app/flux-agent
 
 # Set working directory
 WORKDIR /app
 
 # Expose ports
-EXPOSE 5432 8008 2379 2380
+# 5432 = postgres direct, 8008 = patroni REST, 2379/2380 = etcd, 5433 = primary-routing proxy
+EXPOSE 5432 5433 8008 2379 2380
 
-# Run entrypoint script then start supervisord
-CMD ["/bin/bash", "-c", "/app/entrypoint.sh && supervisord -n"]
+# Run init then start supervisord
+CMD ["/bin/bash", "-c", "/app/flux-agent init && supervisord -n"]
