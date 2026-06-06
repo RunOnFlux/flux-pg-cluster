@@ -62,6 +62,7 @@ type Config struct {
 	PatroniSynchronousMode       bool
 	PatroniSynchronousModeStrict bool
 	PatroniSynchronousNodeCount  int
+	PatroniFailsafeMode          bool
 
 	FluxAPIURL string
 
@@ -138,6 +139,7 @@ func FromEnv() *Config {
 		PatroniSynchronousMode:        envBool("PATRONI_SYNCHRONOUS_MODE", false),
 		PatroniSynchronousModeStrict:  envBool("PATRONI_SYNCHRONOUS_MODE_STRICT", false),
 		PatroniSynchronousNodeCount:   envInt("PATRONI_SYNCHRONOUS_NODE_COUNT", 1),
+		PatroniFailsafeMode:           envBool("PATRONI_FAILSAFE_MODE", true),
 		FluxAPIURL:                    env("FLUX_API_URL", "https://api.runonflux.io"),
 		ProxyEnabled:                  envBool("PROXY_ENABLED", true),
 		ProxyListenPort:               envInt("PROXY_LISTEN_PORT", 5433),
@@ -248,6 +250,8 @@ func (c *Config) applyKV(key, val string) {
 		c.PatroniSynchronousModeStrict = strings.EqualFold(val, "true")
 	case "PATRONI_SYNCHRONOUS_NODE_COUNT":
 		c.PatroniSynchronousNodeCount, _ = strconv.Atoi(val)
+	case "PATRONI_FAILSAFE_MODE":
+		c.PatroniFailsafeMode = strings.EqualFold(val, "true")
 	case "SSL_CERT_VALIDITY_DAYS":
 		c.SSLCertValidityDays, _ = strconv.Atoi(val)
 	}
@@ -295,6 +299,7 @@ func (c *Config) WriteClusterEnv() error {
 		fmt.Sprintf("PATRONI_MASTER_STOP_TIMEOUT=%d", c.PatroniMasterStopTimeout),
 		fmt.Sprintf("PATRONI_USE_SLOTS=%s", strconv.FormatBool(c.PatroniUseSlots)),
 		"PATRONI_LOG_LEVEL=" + c.PatroniLogLevel,
+		fmt.Sprintf("PATRONI_FAILSAFE_MODE=%s", strconv.FormatBool(c.PatroniFailsafeMode)),
 	}
 	return os.WriteFile(ClusterEnvFile, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }

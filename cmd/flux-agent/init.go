@@ -340,6 +340,7 @@ func renderPatroniConfig(in, out string, cfg *config.Config) error {
 		"__SYNCHRONOUS_MODE__":              strconv.FormatBool(cfg.PatroniSynchronousMode),
 		"__SYNCHRONOUS_MODE_STRICT__":       strconv.FormatBool(cfg.PatroniSynchronousModeStrict),
 		"__SYNCHRONOUS_NODE_COUNT__":        strconv.Itoa(cfg.PatroniSynchronousNodeCount),
+		"__PATRONI_FAILSAFE_MODE__":         strconv.FormatBool(cfg.PatroniFailsafeMode),
 		"__PATRONI_TTL__":                   strconv.Itoa(cfg.PatroniTTL),
 		"__PATRONI_LOOP_WAIT__":             strconv.Itoa(cfg.PatroniLoopWait),
 		"__PATRONI_RETRY_TIMEOUT__":         strconv.Itoa(cfg.PatroniRetryTimeout),
