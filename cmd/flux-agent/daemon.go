@@ -251,6 +251,35 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 		}
 	}
 
+	// 7. Promote any learner members that are in the desired set and have caught up.
+	// Learners join without disrupting quorum; the daemon promotes them once they
+	// are reachable. etcd returns an error if the learner is not yet in sync —
+	// we log a warning and retry on the next reconcile cycle.
+	// NOTE: learners return "rpc not supported for learner" for MemberList gRPC
+	// calls, so we use the HTTP /health endpoint to check liveness instead.
+	for _, m := range members {
+		if !m.IsLearner || m.Name == "" {
+			continue
+		}
+		learnerIP := extractHostFromURL(m.ClientURLs)
+		if learnerIP == "" || !containsString(desiredIPs, learnerIP) {
+			pkglog.Infof("skipping learner promotion for %s: ip=%q not in desired set", m.Name, learnerIP)
+			continue
+		}
+		healthEndpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), learnerIP, cfg.HostEtcdClientPort)
+		if !etcdHealthReachable(healthEndpoint, cfg) {
+			pkglog.Infof("learner %s (%s) not yet healthy — will retry promotion", m.Name, learnerIP)
+			continue
+		}
+		pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := ec.MemberPromote(pctx, m.ID); err != nil {
+			pkglog.Warnf("promote learner %s (id=%s): %v — will retry", m.Name, m.ID, err)
+		} else {
+			pkglog.Infof("promoted learner %s (id=%s) to full voter", m.Name, m.ID)
+		}
+		pcancel()
+	}
+
 	if !stable {
 		pkglog.Infof("state not stable — skipping env update")
 		return

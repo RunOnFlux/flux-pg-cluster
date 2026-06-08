@@ -90,6 +90,10 @@ def test_stale_initialize_key_is_healed(cluster: ClusterManager, mock_api: MockA
     from /initialize and update the key, allowing the replica to rejoin.
     """
     cluster.wait_for_healthy(expected_members=3, timeout=120)
+    # Explicitly wait for etcd gRPC to be ready on the node we'll query.
+    # wait_for_healthy only checks the Patroni HTTP+SQL path; without this,
+    # etcdctl can return DeadlineExceeded during the first few seconds.
+    cluster.wait_for_etcd_ready("postgres-node1", timeout=60)
 
     # Record the real system ID (what /initialize should always contain).
     real_sysid = cluster.etcd_get("postgres-node1", "/patroni/postgres-cluster/initialize")
@@ -123,9 +127,17 @@ def test_stale_initialize_key_is_healed(cluster: ClusterManager, mock_api: MockA
         f"initialize key was not restored: got {healed_sysid!r}, want {real_sysid!r}"
     )
 
-    # All nodes must agree on the same system ID.
+    # All nodes must agree on the same system ID.  Patroni REST API on a node
+    # that just restarted may take a few extra seconds to become available even
+    # after wait_for_healthy returns, so retry briefly.
     for node in ["postgres-node1", "postgres-node2", "postgres-node3"]:
-        node_sysid = cluster.get_pg_system_id(node)
+        deadline = time.time() + 30
+        node_sysid = None
+        while time.time() < deadline:
+            node_sysid = cluster.get_pg_system_id(node)
+            if node_sysid:
+                break
+            time.sleep(2)
         assert node_sysid == real_sysid, (
             f"{node} system ID {node_sysid!r} does not match cluster {real_sysid!r}"
         )
@@ -158,6 +170,7 @@ def test_wrong_epoch_pg_data_triggers_wipe_and_rejoin(
        pg_basebackups → node rejoins.
     """
     cluster.wait_for_healthy(expected_members=3, timeout=120)
+    cluster.wait_for_etcd_ready("postgres-node1", timeout=60)
 
     original_sysid = cluster.etcd_get("postgres-node1", "/patroni/postgres-cluster/initialize")
     assert original_sysid, "initialize key must be set"

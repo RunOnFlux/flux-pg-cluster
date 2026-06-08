@@ -14,7 +14,7 @@ restapi:
   keyfile: /etc/ssl/cluster/patroni/server.key
   cafile: /etc/ssl/cluster/ca/ca.crt
 
-etcd:
+etcd3:
   hosts: __ETCD_HOSTS__
   protocol: __ETCD_PROTOCOL__
   cacert: /etc/ssl/cluster/ca/ca.crt
@@ -33,6 +33,7 @@ bootstrap:
     synchronous_mode: __SYNCHRONOUS_MODE__
     synchronous_mode_strict: __SYNCHRONOUS_MODE_STRICT__
     synchronous_node_count: __SYNCHRONOUS_NODE_COUNT__
+    failsafe_mode: __PATRONI_FAILSAFE_MODE__
     postgresql:
       use_pg_rewind: true
       use_slots: __PATRONI_USE_SLOTS__
