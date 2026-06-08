@@ -203,8 +203,10 @@ func runEtcdStart(args []string) {
 	markEtcdRestart()
 	// Write the v3 API marker so future restarts recognise this data dir as v3
 	// and skip the legacy-migration wipe.
-	if err := os.MkdirAll(*dataDir, 0o755); err == nil {
-		_ = os.WriteFile(markerFile, []byte("etcd3\n"), 0o644)
+	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
+		pkglog.Warnf("create etcd data dir for v3 marker: %v", err)
+	} else if err := os.WriteFile(markerFile, []byte("etcd3\n"), 0o644); err != nil {
+		pkglog.Warnf("write v3 marker %s: %v", markerFile, err)
 	}
 	if err := syscall.Exec("/usr/bin/etcd", append([]string{"etcd"}, args2...), os.Environ()); err != nil {
 		// fallback: lookup PATH
