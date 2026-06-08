@@ -57,15 +57,24 @@ func runEtcdStart(args []string) {
 	if _, err := os.Stat(*dataDir + "/member/snap/db"); err == nil {
 		if _, merr := os.Stat(markerFile); os.IsNotExist(merr) {
 			v3PeerReachable := false
-			for _, ip := range otherIPs {
-				endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
-				ec := etcdmgr.New(endpoint, sslOpts)
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				_, err := ec.MemberList(ctx)
-				cancel()
-				if err == nil {
+			// If there are no peers to query (e.g. single-node cluster), avoid wiping
+			// potentially-valid v3 data. Instead, validate the local data by briefly
+			// starting a temp etcd; only wipe if the v3 binary cannot read it.
+			if len(otherIPs) == 0 {
+				if _, err := verifyLocalDataWithTempEtcd(cfg, *dataDir, *clusterToken, sslOpts, otherIPs); err == nil {
 					v3PeerReachable = true
-					break
+				}
+			} else {
+				for _, ip := range otherIPs {
+					endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
+					ec := etcdmgr.New(endpoint, sslOpts)
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					_, err := ec.MemberList(ctx)
+					cancel()
+					if err == nil {
+						v3PeerReachable = true
+						break
+					}
 				}
 			}
 			if v3PeerReachable {
