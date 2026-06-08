@@ -89,6 +89,12 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	stable, stableCount := updateStateTracker(stateTrackFile, desiredSignature, cfg.DesiredStateStabilityCycles)
 	pkglog.Infof("desired IPs (%d): %v — stable=%v (%d/%d)", len(desiredIPs), desiredIPs, stable, stableCount, cfg.DesiredStateStabilityCycles)
 
+	// Always update cluster_env and patroni.yml with the latest peer list from
+	// Flux API, regardless of stability or etcd health. This ensures a node
+	// that starts while the list is in flux (or while etcd is down) always has
+	// the correct ETCD_INITIAL_CLUSTER / etcd hosts on its next etcd restart.
+	updateClusterEnv(cfg, desiredIPs)
+
 	// 2. Probe local etcd health (write-quorum probe)
 	// Local etcd listens on ETCD_CLIENT_PORT (container-internal port).
 	// Use the external IP with HOST_ETCD_CLIENT_PORT as a fallback — etcd
@@ -281,12 +287,9 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	}
 
 	if !stable {
-		pkglog.Infof("state not stable — skipping env update")
+		pkglog.Infof("state not stable — skipping disruptive reconciliation")
 		return
 	}
-
-	// New members will self-add when they start up; just update env file
-	updateClusterEnv(cfg, desiredIPs)
 }
 
 // pickHealthyEtcdEndpoint tries local then external endpoint via the /health
