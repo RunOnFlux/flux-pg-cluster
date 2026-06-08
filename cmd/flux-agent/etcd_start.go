@@ -47,6 +47,20 @@ func runEtcdStart(args []string) {
 	sslOpts := etcdSSLOpts(cfg)
 	otherIPs := otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName)
 
+	// Auto-migrate from legacy etcd (v2 API / old apt package) to etcd v3.5.
+	// If the data directory has etcd data but no v3 marker file, it was written
+	// by the old binary and is incompatible with the new v3 gRPC setup. Wipe it
+	// so this node starts fresh and rejoins as a learner.
+	markerFile := *dataDir + "/.etcd3_api"
+	if _, err := os.Stat(*dataDir + "/member/snap/db"); err == nil {
+		if _, merr := os.Stat(markerFile); os.IsNotExist(merr) {
+			pkglog.Infof("legacy etcd data detected (no v3 marker) — wiping %s for v3 API migration", *dataDir)
+			if err := wipeDir(*dataDir); err != nil {
+				pkglog.Warnf("v3 migration wipe: %v", err)
+			}
+		}
+	}
+
 	clusterState := ""
 	forceRejoin := false
 	dataPresent := false
@@ -160,6 +174,11 @@ func runEtcdStart(args []string) {
 	// Write the restart marker before exec so the daemon's 90s cooldown kicks
 	// in immediately and prevents a false "etcd unavailable" restart race.
 	markEtcdRestart()
+	// Write the v3 API marker so future restarts recognise this data dir as v3
+	// and skip the legacy-migration wipe.
+	if err := os.MkdirAll(*dataDir, 0o755); err == nil {
+		_ = os.WriteFile(markerFile, []byte("etcd3\n"), 0o644)
+	}
 	if err := syscall.Exec("/usr/bin/etcd", append([]string{"etcd"}, args2...), os.Environ()); err != nil {
 		// fallback: lookup PATH
 		bin, lerr := exec.LookPath("etcd")
