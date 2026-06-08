@@ -47,46 +47,17 @@ func runEtcdStart(args []string) {
 	sslOpts := etcdSSLOpts(cfg)
 	otherIPs := otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName)
 
-	// Auto-migrate from legacy etcd (v2 API / old apt package) to etcd v3.5.
-	// If data exists but no v3 marker, it may be from the old v2 binary. We
-	// distinguish old v2 data from valid v3 data (written by 1.3.0 before the
-	// marker was introduced) by checking whether any peer responds to v3 gRPC:
-	//   - v3 peer reachable  → cluster already v3, just write the marker
-	//   - v2/old peer or none → assume legacy data, wipe so node joins fresh
+	// The .etcd3_api marker records that this data directory was written by the
+	// etcd v3 setup (v3 gRPC API / patroni[etcd3]). It is used as a breadcrumb
+	// for future tooling; no automated wipe is performed based on it because:
+	//   - etcd 3.5 reads etcd 3.3 WAL data without issues (3.x backward compat)
+	//   - Patroni's etcd3 DCS sees an empty v3 keyspace on first boot → re-elects
+	//     fresh while preserving PostgreSQL data — no intervention required
+	//   - Any wipe heuristic based on marker absence risks false positives when
+	//     peers are unreachable (network blip, all nodes restarting together) or
+	//     when otherIPs is empty (single-node / bootstrap candidate)
+	// The marker is written just before exec below; existing data is untouched.
 	markerFile := *dataDir + "/.etcd3_api"
-	if _, err := os.Stat(*dataDir + "/member/snap/db"); err == nil {
-		if _, merr := os.Stat(markerFile); os.IsNotExist(merr) {
-			v3PeerReachable := false
-			// If there are no peers to query (e.g. single-node cluster), avoid wiping
-			// potentially-valid v3 data. Instead, validate the local data by briefly
-			// starting a temp etcd; only wipe if the v3 binary cannot read it.
-			if len(otherIPs) == 0 {
-				if _, err := verifyLocalDataWithTempEtcd(cfg, *dataDir, *clusterToken, sslOpts, otherIPs); err == nil {
-					v3PeerReachable = true
-				}
-			} else {
-				for _, ip := range otherIPs {
-					endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
-					ec := etcdmgr.New(endpoint, sslOpts)
-					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					_, err := ec.MemberList(ctx)
-					cancel()
-					if err == nil {
-						v3PeerReachable = true
-						break
-					}
-				}
-			}
-			if v3PeerReachable {
-				pkglog.Infof("v3 peer reachable — data is already v3 (pre-marker node), skipping migration wipe")
-			} else {
-				pkglog.Infof("no v3 marker and no v3 peer reachable — wiping %s for legacy v2→v3 migration", *dataDir)
-				if err := wipeDir(*dataDir); err != nil {
-					pkglog.Warnf("v3 migration wipe: %v", err)
-				}
-			}
-		}
-	}
 
 	clusterState := ""
 	forceRejoin := false
@@ -203,10 +174,8 @@ func runEtcdStart(args []string) {
 	markEtcdRestart()
 	// Write the v3 API marker so future restarts recognise this data dir as v3
 	// and skip the legacy-migration wipe.
-	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
-		pkglog.Warnf("create etcd data dir for v3 marker: %v", err)
-	} else if err := os.WriteFile(markerFile, []byte("etcd3\n"), 0o644); err != nil {
-		pkglog.Warnf("write v3 marker %s: %v", markerFile, err)
+	if err := os.MkdirAll(*dataDir, 0o755); err == nil {
+		_ = os.WriteFile(markerFile, []byte("etcd3\n"), 0o644)
 	}
 	if err := syscall.Exec("/usr/bin/etcd", append([]string{"etcd"}, args2...), os.Environ()); err != nil {
 		// fallback: lookup PATH
