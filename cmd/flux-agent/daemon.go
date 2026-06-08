@@ -31,6 +31,7 @@ func runDaemon(args []string) {
 	unavailFile := fs.String("unavail-file", "/tmp/etcd-unavailable-count", "etcd unavailable counter")
 	fnfCooldownFile := fs.String("fnf-cooldown-file", "/tmp/force-new-cluster-last-triggered", "FNF cooldown timestamp")
 	fnfFlagFile := fs.String("fnf-flag", "/tmp/force-new-cluster", "force-new-cluster flag file written for etcd-start")
+	pgWipeCooldownFile := fs.String("pg-wipe-cooldown-file", "/tmp/pg-wipe-last-triggered", "PG data wipe cooldown timestamp")
 	_ = fs.Parse(args)
 
 	pkglog.Section("CLUSTER UPDATE DAEMON STARTING (Go agent)")
@@ -44,13 +45,14 @@ func runDaemon(args []string) {
 		cfg.MyName, cfg.MyIP, cfg.SSLEnabled, cfg.UpdateIntervalSeconds, cfg.DesiredStateStabilityCycles)
 
 	fnfCooldownSecs := envIntOr("FNF_COOLDOWN_SECS", 300)
+	pgWipeCooldownSecs := envIntOr("PG_WIPE_COOLDOWN_SECS", 300)
 
 	sslOpts := etcdSSLOpts(cfg)
 	fc := fluxapi.New(cfg.FluxAPIURL)
 
 	for {
 		pkglog.Section(fmt.Sprintf("CLUSTER UPDATE CYCLE - %s", time.Now().Format(time.RFC3339)))
-		runReconcile(cfg, fc, sslOpts, *stateTrackFile, *noQuorumFile, *unavailFile, *fnfCooldownFile, *fnfFlagFile, fnfCooldownSecs)
+		runReconcile(cfg, fc, sslOpts, *stateTrackFile, *noQuorumFile, *unavailFile, *fnfCooldownFile, *fnfFlagFile, fnfCooldownSecs, *pgWipeCooldownFile, pgWipeCooldownSecs)
 		pkglog.Infof("sleeping for %d seconds", cfg.UpdateIntervalSeconds)
 		time.Sleep(time.Duration(cfg.UpdateIntervalSeconds) * time.Second)
 	}
@@ -71,7 +73,8 @@ func envIntOr(key string, def int) int {
 // runReconcile is one iteration of the daemon loop. Extracted to keep it
 // testable and to make each cycle's flow easier to follow.
 func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
-	stateTrackFile, noQuorumFile, unavailFile, fnfCooldownFile, fnfFlagFile string, fnfCooldownSecs int) {
+	stateTrackFile, noQuorumFile, unavailFile, fnfCooldownFile, fnfFlagFile string, fnfCooldownSecs int,
+	pgWipeCooldownFile string, pgWipeCooldownSecs int) {
 
 	// 1. Get desired state from Flux API
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -88,6 +91,12 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	desiredSignature := strings.Join(desiredIPs, ",")
 	stable, stableCount := updateStateTracker(stateTrackFile, desiredSignature, cfg.DesiredStateStabilityCycles)
 	pkglog.Infof("desired IPs (%d): %v — stable=%v (%d/%d)", len(desiredIPs), desiredIPs, stable, stableCount, cfg.DesiredStateStabilityCycles)
+
+	// Always update cluster_env and patroni.yml with the latest peer list from
+	// Flux API, regardless of stability or etcd health. This ensures a node
+	// that starts while the list is in flux (or while etcd is down) always has
+	// the correct ETCD_INITIAL_CLUSTER / etcd hosts on its next etcd restart.
+	updateClusterEnv(cfg, desiredIPs)
 
 	// 2. Probe local etcd health (write-quorum probe)
 	// Local etcd listens on ETCD_CLIENT_PORT (container-internal port).
@@ -216,7 +225,7 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	// so replicas with the correct data can rejoin without wiping.
 	// If this node's local PG data has a mismatched system ID (and a healthy
 	// primary exists), wipe local data so Patroni will pg_basebackup fresh.
-	checkPatroniSystemID(cfg, ec, desiredIPs)
+	checkPatroniSystemID(cfg, ec, desiredIPs, pgWipeCooldownFile, pgWipeCooldownSecs)
 
 	// 6. Reconcile membership
 	// Members not in the Flux API are removed:
@@ -281,12 +290,9 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	}
 
 	if !stable {
-		pkglog.Infof("state not stable — skipping env update")
+		pkglog.Infof("state not stable — skipping disruptive reconciliation")
 		return
 	}
-
-	// New members will self-add when they start up; just update env file
-	updateClusterEnv(cfg, desiredIPs)
 }
 
 // pickHealthyEtcdEndpoint tries local then external endpoint via the /health
@@ -483,7 +489,7 @@ func checkStalePatroniLeader(cfg *config.Config, ec *etcdmgr.Client) {
 // Note: a running replica is sufficient evidence for case 2. We do not require
 // the primary to be reachable — waiting for it would leave crash-looping nodes
 // unhealed whenever the primary is on a different network segment.
-func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []string) {
+func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []string, wipeCooldownFile string, wipeCooldownSecs int) {
 	initKey := fmt.Sprintf("/patroni/%s/initialize", cfg.PatroniScope)
 
 	// Read the etcd cluster-initialize system identifier.
@@ -560,6 +566,11 @@ func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []s
 	}
 	pkglog.Warnf("local PG system ID %s != cluster system ID %s — wiping data for clean pg_basebackup",
 		localSysID, etcdSysID)
+	if !shouldFNFNow(wipeCooldownFile, wipeCooldownSecs) {
+		pkglog.Infof("PG wipe cooldown active — skipping wipe this cycle")
+		return
+	}
+	_ = os.WriteFile(wipeCooldownFile, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644)
 	supervisorctl("stop", "patroni")
 	if err := wipeDir("/var/lib/postgresql/data"); err != nil {
 		pkglog.Errorf("failed to wipe PG data: %v", err)

@@ -47,6 +47,18 @@ func runEtcdStart(args []string) {
 	sslOpts := etcdSSLOpts(cfg)
 	otherIPs := otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName)
 
+	// The .etcd3_api marker records that this data directory was written by the
+	// etcd v3 setup (v3 gRPC API / patroni[etcd3]). It is used as a breadcrumb
+	// for future tooling; no automated wipe is performed based on it because:
+	//   - etcd 3.5 reads etcd 3.3 WAL data without issues (3.x backward compat)
+	//   - Patroni's etcd3 DCS sees an empty v3 keyspace on first boot → re-elects
+	//     fresh while preserving PostgreSQL data — no intervention required
+	//   - Any wipe heuristic based on marker absence risks false positives when
+	//     peers are unreachable (network blip, all nodes restarting together) or
+	//     when otherIPs is empty (single-node / bootstrap candidate)
+	// The marker is written just before exec below; existing data is untouched.
+	markerFile := *dataDir + "/.etcd3_api"
+
 	clusterState := ""
 	forceRejoin := false
 	dataPresent := false
@@ -160,6 +172,11 @@ func runEtcdStart(args []string) {
 	// Write the restart marker before exec so the daemon's 90s cooldown kicks
 	// in immediately and prevents a false "etcd unavailable" restart race.
 	markEtcdRestart()
+	// Write the v3 API marker so future restarts recognise this data dir as v3
+	// and skip the legacy-migration wipe.
+	if err := os.MkdirAll(*dataDir, 0o755); err == nil {
+		_ = os.WriteFile(markerFile, []byte("etcd3\n"), 0o644)
+	}
 	if err := syscall.Exec("/usr/bin/etcd", append([]string{"etcd"}, args2...), os.Environ()); err != nil {
 		// fallback: lookup PATH
 		bin, lerr := exec.LookPath("etcd")
