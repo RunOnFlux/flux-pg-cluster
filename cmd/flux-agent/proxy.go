@@ -106,18 +106,22 @@ func runProxy(args []string) {
 }
 
 // probePrimary contacts every candidate IP and updates primaryIP atomically.
-// Candidates are re-read from ETCD_HOSTS in /etc/cluster_env on every cycle so
-// membership changes picked up by the updater are visible without restarting.
+// Membership is refreshed from ETCD_HOSTS in /etc/cluster_env each cycle via a
+// local config copy so the shared startup cfg used by the accept loop is never
+// mutated concurrently.
 func probePrimary(ctx context.Context, cfg *config.Config, primaryIP *atomic.Value) {
-	if err := config.LoadClusterEnv(cfg); err != nil {
+	probeCfg := *cfg
+	if err := config.LoadClusterEnv(&probeCfg); err != nil {
 		pkglog.Warnf("proxy: could not reload %s: %v", config.ClusterEnvFile, err)
 	}
-	ips := candidateIPs(cfg)
+	ips := candidateIPs(&probeCfg)
 	if len(ips) == 0 {
 		return
 	}
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+
+	clients := newPatroniProbeClients(&probeCfg)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -126,7 +130,7 @@ func probePrimary(ctx context.Context, cfg *config.Config, primaryIP *atomic.Val
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
-			role := checkPatroniRole(pctx, cfg, ip)
+			role := checkPatroniRole(pctx, &probeCfg, ip, clients)
 			if role == patroni.RolePrimary {
 				mu.Lock()
 				found = ip
@@ -147,12 +151,34 @@ func probePrimary(ctx context.Context, cfg *config.Config, primaryIP *atomic.Val
 	}
 }
 
+// patroniProbeClients holds reusable Patroni HTTP clients for one probe cycle.
+// Local probes use the container Patroni port; remote probes use the host-mapped
+// port. http.Client is safe for concurrent use by the per-IP probe goroutines.
+type patroniProbeClients struct {
+	local  *patroni.Client
+	remote *patroni.Client
+}
+
+func newPatroniProbeClients(cfg *config.Config) patroniProbeClients {
+	local := patroni.New(cfg.SSLEnabled, cfg.PatroniAPIPort)
+	if cfg.HostPatroniAPIPort == cfg.PatroniAPIPort {
+		return patroniProbeClients{local: local, remote: local}
+	}
+	return patroniProbeClients{
+		local:  local,
+		remote: patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort),
+	}
+}
+
 // checkPatroniRole queries the Patroni REST API for the node at ip. When ip is
 // this node's public address, the probe uses localhost and the container
 // Patroni port to avoid hairpin NAT failures on the public IP.
-func checkPatroniRole(ctx context.Context, cfg *config.Config, ip string) patroni.Role {
+func checkPatroniRole(ctx context.Context, cfg *config.Config, ip string, clients patroniProbeClients) patroni.Role {
 	host, port := patroniProbeTarget(cfg, ip)
-	pc := patroni.New(cfg.SSLEnabled, port)
+	pc := clients.remote
+	if port == cfg.PatroniAPIPort {
+		pc = clients.local
+	}
 	role, _ := pc.CheckRole(ctx, host)
 	return role
 }

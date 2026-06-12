@@ -6,6 +6,34 @@ import (
 	"github.com/RunOnFlux/flux-pg-cluster/internal/config"
 )
 
+func TestPatroniProbeClients(t *testing.T) {
+	cfg := &config.Config{
+		SSLEnabled:         true,
+		HostPatroniAPIPort: 22481,
+		PatroniAPIPort:     8008,
+	}
+	clients := newPatroniProbeClients(cfg)
+	if clients.local == nil || clients.remote == nil {
+		t.Fatal("expected local and remote clients")
+	}
+	if clients.local == clients.remote {
+		t.Fatal("expected distinct clients when host and container ports differ")
+	}
+	if clients.local.Port != 8008 || clients.remote.Port != 22481 {
+		t.Fatalf("client ports = %d/%d, want 8008/22481", clients.local.Port, clients.remote.Port)
+	}
+
+	samePortCfg := &config.Config{
+		SSLEnabled:         true,
+		HostPatroniAPIPort: 8008,
+		PatroniAPIPort:     8008,
+	}
+	sameClients := newPatroniProbeClients(samePortCfg)
+	if sameClients.local != sameClients.remote {
+		t.Fatal("expected shared client when host and container ports match")
+	}
+}
+
 func TestPatroniProbeTarget(t *testing.T) {
 	cfg := &config.Config{
 		MyIP:               "80.72.20.162",
