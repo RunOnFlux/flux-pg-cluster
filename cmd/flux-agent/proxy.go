@@ -53,8 +53,6 @@ func runProxy(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
-
 	// Atomic primary IP - updated by health checker, read by acceptor.
 	var primaryIP atomic.Value
 	primaryIP.Store("") // empty until first probe finds one
@@ -64,13 +62,13 @@ func runProxy(args []string) {
 		ticker := time.NewTicker(time.Duration(cfg.ProxyHealthInterval) * time.Second)
 		defer ticker.Stop()
 		// Initial probe immediately
-		probePrimary(ctx, pc, cfg, &primaryIP)
+		probePrimary(ctx, cfg, &primaryIP)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				probePrimary(ctx, pc, cfg, &primaryIP)
+				probePrimary(ctx, cfg, &primaryIP)
 			}
 		}
 	}()
@@ -103,20 +101,27 @@ func runProxy(args []string) {
 				continue
 			}
 		}
-		go handleProxyConn(conn, primaryIP.Load().(string), *targetPort)
+		go handleProxyConn(conn, primaryIP.Load().(string), cfg.MyIP, *targetPort, cfg.PostgresPort)
 	}
 }
 
 // probePrimary contacts every candidate IP and updates primaryIP atomically.
-// Candidates come from /etc/cluster_env (CLUSTER_IPS derived) plus FluxAPI;
-// for simplicity we currently use the IPs encoded in ETCD_HOSTS.
-func probePrimary(ctx context.Context, pc *patroni.Client, cfg *config.Config, primaryIP *atomic.Value) {
-	ips := candidateIPs(cfg)
+// Membership is refreshed from ETCD_HOSTS in /etc/cluster_env each cycle via a
+// local config copy so the shared startup cfg used by the accept loop is never
+// mutated concurrently.
+func probePrimary(ctx context.Context, cfg *config.Config, primaryIP *atomic.Value) {
+	probeCfg := *cfg
+	if err := config.LoadClusterEnv(&probeCfg); err != nil {
+		pkglog.Warnf("proxy: could not reload %s: %v", config.ClusterEnvFile, err)
+	}
+	ips := candidateIPs(&probeCfg)
 	if len(ips) == 0 {
 		return
 	}
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+
+	clients := newPatroniProbeClients(&probeCfg)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -125,7 +130,7 @@ func probePrimary(ctx context.Context, pc *patroni.Client, cfg *config.Config, p
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
-			role, _ := pc.CheckRole(pctx, ip)
+			role := checkPatroniRole(pctx, &probeCfg, ip, clients)
 			if role == patroni.RolePrimary {
 				mu.Lock()
 				found = ip
@@ -144,6 +149,49 @@ func probePrimary(ctx context.Context, pc *patroni.Client, cfg *config.Config, p
 	} else if found == "" && prev == "" {
 		pkglog.Warnf("proxy: no primary found among candidates %v", ips)
 	}
+}
+
+// patroniProbeClients holds reusable Patroni HTTP clients for one probe cycle.
+// Local probes use the container Patroni port; remote probes use the host-mapped
+// port. http.Client is safe for concurrent use by the per-IP probe goroutines.
+type patroniProbeClients struct {
+	local  *patroni.Client
+	remote *patroni.Client
+}
+
+func newPatroniProbeClients(cfg *config.Config) patroniProbeClients {
+	local := patroni.New(cfg.SSLEnabled, cfg.PatroniAPIPort)
+	if cfg.HostPatroniAPIPort == cfg.PatroniAPIPort {
+		return patroniProbeClients{local: local, remote: local}
+	}
+	return patroniProbeClients{
+		local:  local,
+		remote: patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort),
+	}
+}
+
+// checkPatroniRole queries the Patroni REST API for the node at ip. When ip is
+// this node's public address, the probe uses localhost and the container
+// Patroni port to avoid hairpin NAT failures on the public IP.
+func checkPatroniRole(ctx context.Context, cfg *config.Config, ip string, clients patroniProbeClients) patroni.Role {
+	host, port := patroniProbeTarget(cfg, ip)
+	pc := clients.remote
+	if port == cfg.PatroniAPIPort {
+		pc = clients.local
+	}
+	role, _ := pc.CheckRole(ctx, host)
+	return role
+}
+
+// patroniProbeTarget returns the host and port to use when polling Patroni.
+func patroniProbeTarget(cfg *config.Config, ip string) (host string, port int) {
+	host = ip
+	port = cfg.HostPatroniAPIPort
+	if cfg.MyIP != "" && ip == cfg.MyIP {
+		host = "127.0.0.1"
+		port = cfg.PatroniAPIPort
+	}
+	return host, port
 }
 
 // candidateIPs derives the list of candidate node IPs from ETCD_HOSTS.
@@ -193,13 +241,21 @@ func indexByte(s string, b byte) int {
 }
 
 // handleProxyConn dials the current primary and bidirectionally copies bytes.
-func handleProxyConn(client net.Conn, primaryIP string, targetPort int) {
+// When the primary is this node, dial via localhost and the container Postgres
+// port to avoid hairpin NAT failures on the public IP.
+func handleProxyConn(client net.Conn, primaryIP, myIP string, hostPostgresPort, postgresPort int) {
 	defer client.Close()
 	if primaryIP == "" {
 		pkglog.Warnf("proxy: rejecting connection from %s — no primary known yet", client.RemoteAddr())
 		return
 	}
-	target := fmt.Sprintf("%s:%d", primaryIP, targetPort)
+	dialHost := primaryIP
+	dialPort := hostPostgresPort
+	if myIP != "" && primaryIP == myIP {
+		dialHost = "127.0.0.1"
+		dialPort = postgresPort
+	}
+	target := fmt.Sprintf("%s:%d", dialHost, dialPort)
 	upstream, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
 		pkglog.Warnf("proxy: dial %s: %v", target, err)
