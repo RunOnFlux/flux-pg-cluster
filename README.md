@@ -12,6 +12,17 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 - Docker Compose
 - Access to Flux network for API calls
 
+## Docker image tags
+
+| Tag | Branch | PostgreSQL |
+|-----|--------|------------|
+| `latest` | `master` | 14 |
+| `dev` | `development` | 14 |
+| `pg15` | `master` | 15 |
+| `dev-pg15` | `development` | 15 |
+
+Use `latest` / `dev` for existing PostgreSQL 14 clusters. Use `pg15` / `dev-pg15` only for **new** clusters with fresh volumes — do not swap tags on existing PG 14 data directories.
+
 ## Quick Start
 
 ### Production Deployment on Flux Network
@@ -53,7 +64,8 @@ Key Points:
 1. **Deploy on Flux**:
   - Log in to home.runonflux.io and navigate to Applications > Register New App.
   - Add a component for PostgreSQL.
-  - Use the official Docker image: `runonflux/flux-pg-cluster:latest`.
+  - Use the official Docker image: `runonflux/flux-pg-cluster:latest` (PostgreSQL 14).
+  - For PostgreSQL 15, use `runonflux/flux-pg-cluster:pg15` with **fresh volumes** on all nodes.
   - Set the Container Data for the component to `/var/lib/postgresql/data`.
   - Add these ports to the `Cont. Ports` field: `[5432,5433,8008,2379,2380]`.
   - Using the `Ports` field, map those ports to new ones, for example: `[15432,15433,18008,12379,12380]`.

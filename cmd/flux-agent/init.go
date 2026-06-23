@@ -96,10 +96,18 @@ func runInit(args []string) {
 	}
 
 	pkglog.Section("PATRONI CONFIGURATION GENERATION")
+	pgBinDir, err := discoverPostgresBinDir()
+	if err != nil {
+		pkglog.Fatalf("discover postgres bin dir: %v", err)
+	}
+	pkglog.Infof("PostgreSQL bin_dir: %s", pgBinDir)
+	if err := checkPostgresDataVersion("/var/lib/postgresql/data", os.Getenv("POSTGRES_MAJOR")); err != nil {
+		pkglog.Fatalf("postgres data version mismatch: %v", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(*outPath), 0o755); err != nil {
 		pkglog.Fatalf("mkdir patroni dir: %v", err)
 	}
-	if err := renderPatroniConfig(*templatePath, *outPath, cfg); err != nil {
+	if err := renderPatroniConfig(*templatePath, *outPath, cfg, pgBinDir); err != nil {
 		pkglog.Fatalf("render patroni config: %v", err)
 	}
 	pkglog.Infof("patroni.yml written to %s", *outPath)
@@ -312,10 +320,54 @@ func runCertsScript(script string, cfg *config.Config) error {
 	return cmd.Run()
 }
 
+// discoverPostgresBinDir returns the PostgreSQL binary directory for the
+// version installed in this image. POSTGRES_MAJOR (set at image build time) is
+// preferred; otherwise common install paths are probed.
+func discoverPostgresBinDir() (string, error) {
+	if major := strings.TrimSpace(os.Getenv("POSTGRES_MAJOR")); major != "" {
+		dir := filepath.Join("/usr/lib/postgresql", major, "bin")
+		if _, err := os.Stat(filepath.Join(dir, "postgres")); err == nil {
+			return dir, nil
+		}
+	}
+	for _, major := range []string{"17", "16", "15", "14", "13"} {
+		dir := filepath.Join("/usr/lib/postgresql", major, "bin")
+		if _, err := os.Stat(filepath.Join(dir, "postgres")); err == nil {
+			return dir, nil
+		}
+	}
+	return "", errors.New("postgres binary not found under /usr/lib/postgresql/*/bin")
+}
+
+// checkPostgresDataVersion rejects starting when an existing data directory was
+// initialized by a different PostgreSQL major version than this image provides.
+func checkPostgresDataVersion(dataDir, expectedMajor string) error {
+	expectedMajor = strings.TrimSpace(expectedMajor)
+	if expectedMajor == "" {
+		return nil
+	}
+	pgVersionFile := filepath.Join(dataDir, "PG_VERSION")
+	data, err := os.ReadFile(pgVersionFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	existingMajor := strings.TrimSpace(string(data))
+	if existingMajor != expectedMajor {
+		return fmt.Errorf(
+			"data directory has PostgreSQL %s but this image provides PostgreSQL %s; use a matching image tag or fresh volumes",
+			existingMajor, expectedMajor,
+		)
+	}
+	return nil
+}
+
 // renderPatroniConfig reads the legacy "__VAR__" placeholder template and
 // substitutes it with cfg values. We keep the legacy template format so the
 // same file can be used by the shell scripts during the transition.
-func renderPatroniConfig(in, out string, cfg *config.Config) error {
+func renderPatroniConfig(in, out string, cfg *config.Config, pgBinDir string) error {
 	data, err := os.ReadFile(in)
 	if err != nil {
 		return err
@@ -349,6 +401,7 @@ func renderPatroniConfig(in, out string, cfg *config.Config) error {
 		"__PATRONI_MASTER_STOP_TIMEOUT__":   strconv.Itoa(cfg.PatroniMasterStopTimeout),
 		"__PATRONI_USE_SLOTS__":             strconv.FormatBool(cfg.PatroniUseSlots),
 		"__PATRONI_LOG_LEVEL__":             cfg.PatroniLogLevel,
+		"__POSTGRES_BIN_DIR__":              pgBinDir,
 	}
 	s := string(data)
 	for k, v := range replacements {

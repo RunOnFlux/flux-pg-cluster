@@ -7,12 +7,17 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=
 
 FROM ubuntu:22.04
 
-ENV DEBIAN_FRONTEND=noninteractive
+ARG POSTGRES_MAJOR=14
+ARG VERSION=dev
 
-# Install system dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+ENV POSTGRES_MAJOR=${POSTGRES_MAJOR}
+
+LABEL org.opencontainers.image.version="${VERSION}" \
+      runonflux.postgres.major="${POSTGRES_MAJOR}"
+
+# Install system dependencies, then PostgreSQL from PGDG so 14 and 15 share one Dockerfile.
 RUN apt-get update && apt-get install -y \
-    postgresql-14 \
-    postgresql-client-14 \
     curl \
     jq \
     python3 \
@@ -22,12 +27,21 @@ RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     ca-certificates \
+    lsb-release \
     net-tools \
     procps \
     openssl \
     xxd \
     vim-common \
     gnutls-bin \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y \
+        postgresql-${POSTGRES_MAJOR} \
+        postgresql-client-${POSTGRES_MAJOR} \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
