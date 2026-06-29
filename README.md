@@ -346,3 +346,8 @@ Check logs for each component:
 /var/log/supervisor/updater.out.log
 /var/log/supervisor/proxy.out.log
 ```
+## Related Projects
+
+- Flux Postgres Cluster: [https://github.com/RunOnFlux/flux-pg-cluster](https://github.com/RunOnFlux/flux-pg-cluster)
+- Flux MongoDB Cluster: [https://github.com/RunOnFlux/flux-mongodb-cluster](https://github.com/RunOnFlux/flux-mongodb-cluster)
+- Flux Redis Cluster: [https://github.com/RunOnFlux/flux-redis-cluster](https://github.com/RunOnFlux/flux-redis-cluster)
