@@ -545,9 +545,22 @@ func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []s
 	}
 
 	// Case 2: local PG data has a system ID from a different cluster epoch.
-	// Only attempt if we are NOT the primary and PG data actually exists,
-	// and at least one peer confirms the correct cluster system ID.
-	if !anyMatchingMember {
+	//
+	// This deletes the local PostgreSQL data directory, so getting the
+	// "authoritative" system ID wrong destroys real data. A freshly-bootstrapped
+	// EMPTY cluster publishes its own system ID to /initialize; if we then trust
+	// a single re-cloned replica as confirmation, we will delete the *real* data
+	// on every surviving node. That is exactly how a production cluster was
+	// emptied. Two guards prevent a recurrence:
+	//
+	//   1. Require the live PRIMARY (not merely "any member") to confirm the
+	//      authoritative system ID before we treat the local data as stale.
+	//      A replica that was itself re-cloned from a bad epoch is not enough.
+	//   2. Never auto-wipe unless ALLOW_PG_DATA_WIPE is explicitly enabled. By
+	//      default we log a loud, actionable error and leave the data intact so
+	//      a human can confirm the authoritative copy before anything is deleted.
+	primaryConfirmsSysID := primaryIP != "" && primarySysID != "" && primarySysID == etcdSysID
+	if !primaryConfirmsSysID {
 		return
 	}
 	if cfg.MyIP == primaryIP {
@@ -564,7 +577,15 @@ func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []s
 	if localSysID == etcdSysID {
 		return
 	}
-	pkglog.Warnf("local PG system ID %s != cluster system ID %s — wiping data for clean pg_basebackup",
+	if !cfg.AllowPGDataWipe {
+		pkglog.Errorf("DATA SAFETY: local PG system ID %s != cluster system ID %s (confirmed by primary %s), "+
+			"but ALLOW_PG_DATA_WIPE is disabled — refusing to delete /var/lib/postgresql/data. "+
+			"If this node genuinely holds stale data, verify the authoritative copy first, then either remove "+
+			"this node's data dir manually or set ALLOW_PG_DATA_WIPE=true so Patroni can re-clone it.",
+			localSysID, etcdSysID, primaryIP)
+		return
+	}
+	pkglog.Warnf("local PG system ID %s != cluster system ID %s — wiping data for clean pg_basebackup (ALLOW_PG_DATA_WIPE=true)",
 		localSysID, etcdSysID)
 	if !shouldFNFNow(wipeCooldownFile, wipeCooldownSecs) {
 		pkglog.Infof("PG wipe cooldown active — skipping wipe this cycle")

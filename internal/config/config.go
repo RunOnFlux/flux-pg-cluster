@@ -45,6 +45,7 @@ type Config struct {
 	AllowAnyNodeBootstrap         bool
 	AutoBootstrapIfFresh          bool
 	DeadClusterRecovery           bool
+	AllowPGDataWipe               bool
 	EtcdJoinMaxRetries            int
 	EtcdJoinRetryDelaySeconds     int
 	UpdateIntervalSeconds         int
@@ -121,8 +122,19 @@ func FromEnv() *Config {
 		EtcdPeerPort:                  envInt("ETCD_PEER_PORT", 2380),
 		AllowNewClusterBootstrap:      envBool("ALLOW_NEW_CLUSTER_BOOTSTRAP", false),
 		AllowAnyNodeBootstrap:         envBool("ALLOW_ANY_NODE_BOOTSTRAP", false),
-		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", true),
+		// AUTO_BOOTSTRAP_IF_FRESH defaults to FALSE. A fresh/empty node (e.g. one
+		// that Flux rescheduled onto new storage) must NOT silently initdb a brand
+		// new empty cluster — doing so creates a fresh epoch that the system-ID
+		// self-heal then propagates across the cluster, destroying real data on
+		// every surviving member. With this disabled, a fresh node waits to JOIN an
+		// existing cluster instead. Genuine first-time cluster creation is an
+		// explicit, one-time action via ALLOW_NEW_CLUSTER_BOOTSTRAP=true.
+		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", false),
 		DeadClusterRecovery:           envBool("DEAD_CLUSTER_RECOVERY", true),
+		// ALLOW_PG_DATA_WIPE defaults to FALSE. The updater's system-ID self-heal
+		// will never delete /var/lib/postgresql/data unless this is explicitly set;
+		// instead it logs a loud, actionable error and leaves the data intact.
+		AllowPGDataWipe:               envBool("ALLOW_PG_DATA_WIPE", false),
 		EtcdJoinMaxRetries:            envInt("ETCD_JOIN_MAX_RETRIES", 12),
 		EtcdJoinRetryDelaySeconds:     envInt("ETCD_JOIN_RETRY_DELAY_SECONDS", 10),
 		UpdateIntervalSeconds:         envInt("UPDATE_INTERVAL_SECONDS", 60),
@@ -218,6 +230,8 @@ func (c *Config) applyKV(key, val string) {
 		c.AutoBootstrapIfFresh = strings.EqualFold(val, "true")
 	case "DEAD_CLUSTER_RECOVERY":
 		c.DeadClusterRecovery = strings.EqualFold(val, "true")
+	case "ALLOW_PG_DATA_WIPE":
+		c.AllowPGDataWipe = strings.EqualFold(val, "true")
 	case "ETCD_JOIN_MAX_RETRIES":
 		c.EtcdJoinMaxRetries, _ = strconv.Atoi(val)
 	case "ETCD_JOIN_RETRY_DELAY_SECONDS":
@@ -286,6 +300,7 @@ func (c *Config) WriteClusterEnv() error {
 		fmt.Sprintf("ALLOW_ANY_NODE_BOOTSTRAP=%s", strconv.FormatBool(c.AllowAnyNodeBootstrap)),
 		fmt.Sprintf("AUTO_BOOTSTRAP_IF_FRESH=%s", strconv.FormatBool(c.AutoBootstrapIfFresh)),
 		fmt.Sprintf("DEAD_CLUSTER_RECOVERY=%s", strconv.FormatBool(c.DeadClusterRecovery)),
+		fmt.Sprintf("ALLOW_PG_DATA_WIPE=%s", strconv.FormatBool(c.AllowPGDataWipe)),
 		fmt.Sprintf("ETCD_JOIN_MAX_RETRIES=%d", c.EtcdJoinMaxRetries),
 		fmt.Sprintf("ETCD_JOIN_RETRY_DELAY_SECONDS=%d", c.EtcdJoinRetryDelaySeconds),
 		fmt.Sprintf("UPDATE_INTERVAL_SECONDS=%d", c.UpdateIntervalSeconds),

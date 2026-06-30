@@ -125,8 +125,11 @@ Key Points:
 | `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
 | `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
 | `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
-| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Allow creating a new multi-member etcd cluster when no peers are reachable. Keep `false` during normal operations. | `false` |
+| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Allow creating a new multi-member etcd cluster when no peers are reachable. Keep `false` during normal operations; set `true` only for a deliberate first-time cluster creation, then unset it. | `false` |
 | `ALLOW_ANY_NODE_BOOTSTRAP` | If `true`, bypass deterministic bootstrap-candidate restriction. Keep `false` for safety. | `false` |
+| `AUTO_BOOTSTRAP_IF_FRESH` | If `true`, a node with empty etcd **and** empty PostgreSQL data that cannot reach any peer will `initdb` a brand-new empty cluster. **Defaults to `false`** because on Flux a rescheduled node comes up on fresh storage, and auto-bootstrapping there creates an empty epoch that the self-heal logic then propagates across the cluster — destroying real data. Leave `false`; use `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` for intentional first-time creation instead. | `false` |
+| `DEAD_CLUSTER_RECOVERY` | If `true`, the deterministic candidate may bootstrap a new **etcd** cluster when etcd data is lost but **PostgreSQL data is preserved** (etcd-only recovery; PG data is never wiped on this path). | `true` |
+| `ALLOW_PG_DATA_WIPE` | If `true`, the updater may delete `/var/lib/postgresql/data` when this node's PostgreSQL system ID differs from the cluster's authoritative system ID (so Patroni can re-clone via `pg_basebackup`). **Defaults to `false`**: instead of deleting data, the updater logs a loud, actionable error and leaves the data intact for a human to verify. Only enable temporarily, on a node you have confirmed holds stale data. | `false` |
 | `ETCD_JOIN_MAX_RETRIES` | How many peer-join attempts are made before deciding bootstrap behavior | `12` |
 | `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
 | `UPDATE_INTERVAL_SECONDS` | Update daemon reconciliation interval | `60` |
@@ -147,12 +150,20 @@ Key Points:
 | `PROXY_LISTEN_PORT` | Port the primary-routing proxy listens on inside the container | `5433` |
 | `PROXY_HEALTH_INTERVAL_SECONDS` | How often (seconds) the proxy polls Patroni to discover the current primary | `3` |
 
-### Split-Brain Prevention Controls
+### Split-Brain & Data-Loss Prevention Controls
 
-- Multi-member clusters no longer auto-bootstrap as new unless `ALLOW_NEW_CLUSTER_BOOTSTRAP=true`.
+- **Fresh nodes never auto-create an empty cluster.** `AUTO_BOOTSTRAP_IF_FRESH` defaults to `false`, so a node that comes up on empty storage (e.g. a Flux reschedule) keeps retrying to **join** the existing cluster instead of `initdb`-ing a new empty epoch. This is the single most important guard: an auto-bootstrapped empty epoch can otherwise be propagated cluster-wide by the self-heal logic and destroy real data.
+- **The updater never deletes PostgreSQL data by default.** `ALLOW_PG_DATA_WIPE` defaults to `false`. When a system-ID mismatch is detected, the updater requires the **live primary** (not just any replica) to confirm the authoritative system ID, and even then only logs a loud error rather than wiping — a human must confirm and act.
+- Multi-member clusters do not auto-bootstrap as new unless `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` (intended for one-time first creation only).
 - By default, only one deterministic bootstrap candidate (lowest node name) may bootstrap a new cluster.
-- Mismatch detection evaluates all reachable peers and only performs destructive self-heal when mismatch is the majority view.
+- etcd-only `DEAD_CLUSTER_RECOVERY` preserves PostgreSQL data; it never wipes the PG data directory.
 - Membership removals and `ETCD_INITIAL_CLUSTER` rewrites are gated by desired-state stability to reduce churn-induced drift.
+
+### First-time cluster creation
+
+Because `AUTO_BOOTSTRAP_IF_FRESH` is now `false`, a brand-new cluster will not form on its own. To create a cluster for the first time, deploy with `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` (only the deterministic candidate will bootstrap), wait for all members to join and replicate, then **remove the variable / set it back to `false`** for normal operation. Leaving it enabled re-introduces the risk that a simultaneous all-node reschedule onto fresh storage re-bootstraps an empty cluster.
+
+> ⚠️ **Backups are not optional.** This is an HA cluster, not a backup. Replication protects against a node failing, **not** against a bad epoch, an operator mistake, or the failure modes above. Configure off-cluster backups before storing anything you care about — e.g. a periodic `pg_dump`/`pg_dumpall` to external storage, continuous WAL archiving, or a tool such as pgBackRest/WAL-G. Verify restores regularly.
 
 ### Synchronous Replication
 
