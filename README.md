@@ -149,6 +149,11 @@ Key Points:
 | `PROXY_ENABLED` | Enable the TCP primary-routing proxy on port 5433. Set to `false` to disable (port 5433 will not be opened). | `true` |
 | `PROXY_LISTEN_PORT` | Port the primary-routing proxy listens on inside the container | `5433` |
 | `PROXY_HEALTH_INTERVAL_SECONDS` | How often (seconds) the proxy polls Patroni to discover the current primary | `3` |
+| `BACKUP_ENABLED` | Enable periodic `pg_dumpall` logical backups (taken only on the healthy primary). | `false` |
+| `BACKUP_INTERVAL_SECONDS` | How often a backup is attempted. Minimum 60. | `86400` (daily) |
+| `BACKUP_DIR` | Directory backups are written to. Map this to a persistent / off-node volume for real durability. | `/var/lib/postgresql/backups` |
+| `BACKUP_RETENTION_COUNT` | Number of most-recent backups to keep. Older ones are pruned after each successful backup. | `1` |
+| `BACKUP_MAX_TOTAL_BYTES` | Cap on total backup storage in bytes (`0` = unlimited). After retention pruning, oldest backups are dropped until the total is under this cap (the newest is always kept). | `0` |
 
 ### Split-Brain & Data-Loss Prevention Controls
 
@@ -207,12 +212,39 @@ Set `PATRONI_SYNCHRONOUS_MODE=true` to switch to **synchronous quorum replicatio
 
 ### Service Management
 
-The supervisord configuration manages four main processes:
+The supervisord configuration manages five main processes:
 
 - **etcd**: Distributed key-value store for cluster coordination
 - **patroni**: PostgreSQL high availability manager
 - **updater**: Background daemon that maintains cluster membership
 - **proxy**: TCP primary-routing proxy on port 5433 (disable with `PROXY_ENABLED=false`)
+- **backup**: Periodic `pg_dumpall` backup agent (opt-in via `BACKUP_ENABLED=true`)
+
+### Backups
+
+> An HA cluster protects against a node failing — it does **not** protect against a bad epoch, an operator mistake, or accidental data loss. Always keep backups of anything you care about.
+
+Set `BACKUP_ENABLED=true` to run the built-in logical-backup agent. Behaviour:
+
+- Runs only on the node Patroni reports as a **healthy, running primary**, so you get a single authoritative copy rather than one per node.
+- Each run streams `pg_dumpall` (compressed) to a temp file and **integrity-checks** it (valid gzip + the pg_dumpall completion marker) before it replaces anything. If the database/cluster is unhealthy or the dump is truncated, the previous good backups are left untouched — **a broken dump never overwrites a good backup**.
+- After a successful backup it prunes: keeps the newest `BACKUP_RETENTION_COUNT` files (default **1**), then drops oldest files until total size is under `BACKUP_MAX_TOTAL_BYTES` (default `0` = unlimited). The just-made backup is never pruned, so the directory does not grow unbounded.
+
+```json
+"BACKUP_ENABLED=true",
+"BACKUP_INTERVAL_SECONDS=86400",
+"BACKUP_DIR=/var/lib/postgresql/backups",
+"BACKUP_RETENTION_COUNT=1",
+"BACKUP_MAX_TOTAL_BYTES=0"
+```
+
+> **Durability note:** `BACKUP_DIR` defaults to a path inside the container. For backups that survive a node loss/reschedule, map `BACKUP_DIR` to a persistent or off-node volume (or sync it externally). For point-in-time recovery beyond a daily dump, layer on continuous WAL archiving (pgBackRest / WAL-G).
+
+**Restore** from a dump (on a fresh primary):
+
+```bash
+gunzip -c /var/lib/postgresql/backups/pgdumpall-<TS>.sql.gz | psql -h 127.0.0.1 -p 5432 -U postgres
+```
 
 ### Access PostgreSQL
 

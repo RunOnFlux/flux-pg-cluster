@@ -23,6 +23,7 @@ Subcommands:
   etcd-start   Start etcd with join/bootstrap logic (replaces start-etcd.sh)
   daemon       Run the cluster reconciliation loop (replaces update-cluster.sh)
   proxy        Run TCP proxy routing writes to the current Patroni primary
+  backup       Run periodic pg_dumpall backups on the primary (opt-in)
   version      Print version and exit
   help         Print this help message
 `, version)
@@ -42,6 +43,8 @@ func main() {
 		runDaemon(os.Args[2:])
 	case "proxy":
 		runProxy(os.Args[2:])
+	case "backup":
+		runBackup(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println(version)
 	case "help", "--help", "-h":
