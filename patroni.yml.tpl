@@ -74,7 +74,7 @@ postgresql:
   listen: 0.0.0.0:__POSTGRES_PORT__
   connect_address: __MY_IP__:__HOST_POSTGRES_PORT__
   data_dir: /var/lib/postgresql/data
-  bin_dir: /usr/lib/postgresql/14/bin
+  bin_dir: __POSTGRES_BIN_DIR__
   pgpass: /tmp/pgpass
   authentication:
     replication:

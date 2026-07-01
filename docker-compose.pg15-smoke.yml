@@ -1,0 +1,14 @@
+# Local smoke-test override: build all nodes with PostgreSQL 15.
+services:
+  postgres-node1:
+    build:
+      args:
+        POSTGRES_MAJOR: "15"
+  postgres-node2:
+    build:
+      args:
+        POSTGRES_MAJOR: "15"
+  postgres-node3:
+    build:
+      args:
+        POSTGRES_MAJOR: "15"

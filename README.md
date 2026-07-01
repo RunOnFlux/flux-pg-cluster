@@ -1,5 +1,5 @@
 # Flux PostgreSQL Cluster
-![Version](https://img.shields.io/badge/version-1.3.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
 ![Docker](https://img.shields.io/badge/Docker-required-blue.svg)
@@ -11,6 +11,17 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 - Docker
 - Docker Compose
 - Access to Flux network for API calls
+
+## Docker image tags
+
+| Tag | Branch | PostgreSQL |
+|-----|--------|------------|
+| `latest` | `master` | 14 |
+| `dev` | `development` | 14 |
+| `pg15` | `master` | 15 |
+| `dev-pg15` | `development` | 15 |
+
+Use `latest` / `dev` for existing PostgreSQL 14 clusters. Use `pg15` / `dev-pg15` only for **new** clusters with fresh volumes — do not swap tags on existing PG 14 data directories.
 
 ## Quick Start
 
@@ -53,7 +64,8 @@ Key Points:
 1. **Deploy on Flux**:
   - Log in to home.runonflux.io and navigate to Applications > Register New App.
   - Add a component for PostgreSQL.
-  - Use the official Docker image: `runonflux/flux-pg-cluster:latest`.
+  - Use the official Docker image: `runonflux/flux-pg-cluster:latest` (PostgreSQL 14).
+  - For PostgreSQL 15, use `runonflux/flux-pg-cluster:pg15` with **fresh volumes** on all nodes.
   - Set the Container Data for the component to `/var/lib/postgresql/data`.
   - Add these ports to the `Cont. Ports` field: `[5432,5433,8008,2379,2380]`.
   - Using the `Ports` field, map those ports to new ones, for example: `[15432,15433,18008,12379,12380]`.
@@ -113,8 +125,11 @@ Key Points:
 | `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
 | `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
 | `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
-| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Allow creating a new multi-member etcd cluster when no peers are reachable. Keep `false` during normal operations. | `false` |
+| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Allow creating a new multi-member etcd cluster when no peers are reachable. Keep `false` during normal operations; set `true` only for a deliberate first-time cluster creation, then unset it. | `false` |
 | `ALLOW_ANY_NODE_BOOTSTRAP` | If `true`, bypass deterministic bootstrap-candidate restriction. Keep `false` for safety. | `false` |
+| `AUTO_BOOTSTRAP_IF_FRESH` | If `true`, the deterministic candidate may `initdb` a new cluster when it is genuinely fresh (empty etcd **and** empty PG) and no peer is reachable. Needed for first-boot auto-formation. Data-loss from a mistaken fresh epoch is prevented by `ALLOW_PG_DATA_WIPE` below, not by disabling this. | `true` |
+| `DEAD_CLUSTER_RECOVERY` | If `true`, the deterministic candidate may bootstrap a new **etcd** cluster when etcd data is lost but **PostgreSQL data is preserved** (etcd-only recovery; PG data is never wiped on this path). | `true` |
+| `ALLOW_PG_DATA_WIPE` | If `true`, the updater may delete `/var/lib/postgresql/data` when this node's PostgreSQL system ID differs from the cluster's authoritative system ID (so Patroni can re-clone via `pg_basebackup`). **Defaults to `false`**: instead of deleting data, the updater logs a loud, actionable error and leaves the data intact for a human to verify. When enabled, the wipe still requires the **live primary** to confirm the authoritative system ID. Only enable temporarily, on a node you have confirmed holds stale data. | `false` |
 | `ETCD_JOIN_MAX_RETRIES` | How many peer-join attempts are made before deciding bootstrap behavior | `12` |
 | `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
 | `UPDATE_INTERVAL_SECONDS` | Update daemon reconciliation interval | `60` |
@@ -134,13 +149,21 @@ Key Points:
 | `PROXY_ENABLED` | Enable the TCP primary-routing proxy on port 5433. Set to `false` to disable (port 5433 will not be opened). | `true` |
 | `PROXY_LISTEN_PORT` | Port the primary-routing proxy listens on inside the container | `5433` |
 | `PROXY_HEALTH_INTERVAL_SECONDS` | How often (seconds) the proxy polls Patroni to discover the current primary | `3` |
+| `BACKUP_ENABLED` | Enable periodic `pg_dumpall` logical backups (taken only on the healthy primary). | `false` |
+| `BACKUP_INTERVAL_SECONDS` | How often a backup is attempted. Minimum 60. | `86400` (daily) |
+| `BACKUP_DIR` | Directory backups are written to. Map this to a persistent / off-node volume for real durability. | `/var/lib/postgresql/backups` |
+| `BACKUP_RETENTION_COUNT` | Number of most-recent backups to keep. Older ones are pruned after each successful backup. | `1` |
+| `BACKUP_MAX_TOTAL_BYTES` | Cap on total backup storage in bytes (`0` = unlimited). After retention pruning, oldest backups are dropped until the total is under this cap (the newest is always kept). | `0` |
 
-### Split-Brain Prevention Controls
+### Split-Brain & Data-Loss Prevention Controls
 
-- Multi-member clusters no longer auto-bootstrap as new unless `ALLOW_NEW_CLUSTER_BOOTSTRAP=true`.
+- **The updater never deletes PostgreSQL data by default.** `ALLOW_PG_DATA_WIPE` defaults to `false`. When a system-ID mismatch is detected, the updater requires the **live primary** (not just any re-cloned replica) to confirm the authoritative system ID, and even then only logs a loud error rather than wiping — a human must confirm and act. This is the load-bearing guard: even if a stray/empty epoch briefly appears, it can no longer cause surviving nodes to auto-delete real data.
+- Multi-member clusters do not auto-bootstrap as new unless `AUTO_BOOTSTRAP_IF_FRESH=true` (the default enables first-boot formation) or `ALLOW_NEW_CLUSTER_BOOTSTRAP=true`.
 - By default, only one deterministic bootstrap candidate (lowest node name) may bootstrap a new cluster.
-- Mismatch detection evaluates all reachable peers and only performs destructive self-heal when mismatch is the majority view.
+- etcd-only `DEAD_CLUSTER_RECOVERY` preserves PostgreSQL data; it never wipes the PG data directory.
 - Membership removals and `ETCD_INITIAL_CLUSTER` rewrites are gated by desired-state stability to reduce churn-induced drift.
+
+> ⚠️ **Backups are not optional.** This is an HA cluster, not a backup. Replication protects against a node failing, **not** against a bad epoch, an operator mistake, or the failure modes above. Enable the built-in [backup agent](#backups) and/or configure continuous WAL archiving (pgBackRest/WAL-G) before storing anything you care about. Verify restores regularly.
 
 ### Synchronous Replication
 
@@ -184,12 +207,39 @@ Set `PATRONI_SYNCHRONOUS_MODE=true` to switch to **synchronous quorum replicatio
 
 ### Service Management
 
-The supervisord configuration manages four main processes:
+The supervisord configuration manages five main processes:
 
 - **etcd**: Distributed key-value store for cluster coordination
 - **patroni**: PostgreSQL high availability manager
 - **updater**: Background daemon that maintains cluster membership
 - **proxy**: TCP primary-routing proxy on port 5433 (disable with `PROXY_ENABLED=false`)
+- **backup**: Periodic `pg_dumpall` backup agent (opt-in via `BACKUP_ENABLED=true`)
+
+### Backups
+
+> An HA cluster protects against a node failing — it does **not** protect against a bad epoch, an operator mistake, or accidental data loss. Always keep backups of anything you care about.
+
+Set `BACKUP_ENABLED=true` to run the built-in logical-backup agent. Behaviour:
+
+- Runs only on the node Patroni reports as a **healthy, running primary**, so you get a single authoritative copy rather than one per node.
+- Each run streams `pg_dumpall` (compressed) to a temp file and **integrity-checks** it (valid gzip + the pg_dumpall completion marker) before it replaces anything. If the database/cluster is unhealthy or the dump is truncated, the previous good backups are left untouched — **a broken dump never overwrites a good backup**.
+- After a successful backup it prunes: keeps the newest `BACKUP_RETENTION_COUNT` files (default **1**), then drops oldest files until total size is under `BACKUP_MAX_TOTAL_BYTES` (default `0` = unlimited). The just-made backup is never pruned, so the directory does not grow unbounded.
+
+```json
+"BACKUP_ENABLED=true",
+"BACKUP_INTERVAL_SECONDS=86400",
+"BACKUP_DIR=/var/lib/postgresql/backups",
+"BACKUP_RETENTION_COUNT=1",
+"BACKUP_MAX_TOTAL_BYTES=0"
+```
+
+> **Durability note:** `BACKUP_DIR` defaults to a path inside the container. For backups that survive a node loss/reschedule, map `BACKUP_DIR` to a persistent or off-node volume (or sync it externally). For point-in-time recovery beyond a daily dump, layer on continuous WAL archiving (pgBackRest / WAL-G).
+
+**Restore** from a dump (on a fresh primary):
+
+```bash
+gunzip -c /var/lib/postgresql/backups/pgdumpall-<TS>.sql.gz | psql -h 127.0.0.1 -p 5432 -U postgres
+```
 
 ### Access PostgreSQL
 
