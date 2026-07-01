@@ -26,14 +26,15 @@ Two production scenarios are covered:
     the sole cluster member (it gets a new system ID and owns /initialize),
     then restarting the base nodes that still carry the OLD PG data.
 
-Root cause of the original production failure (why auto-heal was silent):
-  - checkPatroniSystemID only accepted role == "primary" (not "master") and
-    required the PRIMARY to be reachable from the failing node.
-  - When the primary was on a partitioned segment, no primary was found →
-    early return → no healing.
-
-Fix: a running REPLICA with the correct system ID is sufficient evidence
-that the cluster is healthy.  We no longer require the primary itself.
+Data-safety note (post-incident hardening):
+  The PG data wipe in Case 2 is destructive, so it is now OPT-IN via
+  ALLOW_PG_DATA_WIPE (default false) and additionally requires the live
+  PRIMARY (not merely any re-cloned replica) to confirm the authoritative
+  system ID before any data is deleted. This prevents a stray/empty epoch —
+  or a replica cloned from one — from causing surviving nodes to wipe real
+  data. The test enables ALLOW_PG_DATA_WIPE (see docker-compose.test.yml) to
+  exercise the wipe/rejoin path; test-node4 is the live primary that confirms
+  the new system ID.
 
 Timing with test overrides (UPDATE_INTERVAL=15s):
   EC4a: inject bad key → kill/restart replica → daemon corrects key in

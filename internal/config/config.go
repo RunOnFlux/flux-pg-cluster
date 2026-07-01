@@ -122,18 +122,18 @@ func FromEnv() *Config {
 		EtcdPeerPort:                  envInt("ETCD_PEER_PORT", 2380),
 		AllowNewClusterBootstrap:      envBool("ALLOW_NEW_CLUSTER_BOOTSTRAP", false),
 		AllowAnyNodeBootstrap:         envBool("ALLOW_ANY_NODE_BOOTSTRAP", false),
-		// AUTO_BOOTSTRAP_IF_FRESH defaults to FALSE. A fresh/empty node (e.g. one
-		// that Flux rescheduled onto new storage) must NOT silently initdb a brand
-		// new empty cluster — doing so creates a fresh epoch that the system-ID
-		// self-heal then propagates across the cluster, destroying real data on
-		// every surviving member. With this disabled, a fresh node waits to JOIN an
-		// existing cluster instead. Genuine first-time cluster creation is an
-		// explicit, one-time action via ALLOW_NEW_CLUSTER_BOOTSTRAP=true.
-		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", false),
+		// AUTO_BOOTSTRAP_IF_FRESH lets the deterministic candidate initdb a new
+		// cluster when it is genuinely fresh (empty etcd AND empty PG) and can
+		// reach no peers. This is required for first-boot auto-formation, so it
+		// defaults to true. The catastrophic failure mode is NOT this bootstrap
+		// itself but the system-ID self-heal deleting real data to "converge" on a
+		// mistaken fresh epoch — which is now prevented by ALLOW_PG_DATA_WIPE below.
+		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", true),
 		DeadClusterRecovery:           envBool("DEAD_CLUSTER_RECOVERY", true),
 		// ALLOW_PG_DATA_WIPE defaults to FALSE. The updater's system-ID self-heal
 		// will never delete /var/lib/postgresql/data unless this is explicitly set;
-		// instead it logs a loud, actionable error and leaves the data intact.
+		// instead it logs a loud, actionable error and leaves the data intact. This
+		// is the load-bearing guard against a stray/empty epoch wiping real data.
 		AllowPGDataWipe:               envBool("ALLOW_PG_DATA_WIPE", false),
 		EtcdJoinMaxRetries:            envInt("ETCD_JOIN_MAX_RETRIES", 12),
 		EtcdJoinRetryDelaySeconds:     envInt("ETCD_JOIN_RETRY_DELAY_SECONDS", 10),

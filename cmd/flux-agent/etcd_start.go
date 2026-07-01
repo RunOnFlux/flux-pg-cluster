@@ -446,14 +446,9 @@ func decideBootstrap(cfg *config.Config, dataDir string) string {
 			pkglog.Warnf("PG data will NOT be wiped; Patroni will start from existing data as primary")
 			return "new"
 		}
-		pkglog.Errorf("multi-member cluster, no peer found, refusing automatic bootstrap (split-brain / data-loss prevention)")
+		pkglog.Errorf("multi-member cluster, no peer found, refusing automatic bootstrap (split-brain prevention)")
 		pkglog.Errorf("conditions: candidate=%v etcd_empty=%v pg_empty=%v auto_fresh=%v dead_recovery=%v",
 			cfg.MyName == candidate, etcdDataEmpty, pgDataEmpty, cfg.AutoBootstrapIfFresh, cfg.DeadClusterRecovery)
-		if etcdDataEmpty && pgDataEmpty {
-			pkglog.Errorf("this node has NO data and cannot reach peers. It will keep retrying to JOIN rather than create a")
-			pkglog.Errorf("fresh empty cluster (which would destroy real data if the cluster exists elsewhere). For a genuine")
-			pkglog.Errorf("first-time cluster creation only, set ALLOW_NEW_CLUSTER_BOOTSTRAP=true once, then unset it.")
-		}
 		return ""
 	}
 

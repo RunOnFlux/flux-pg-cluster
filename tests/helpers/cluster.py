@@ -249,12 +249,19 @@ class ClusterManager:
         env = {"ETCDCTL_API": "3"}
         last_err: Optional[RuntimeError] = None
         for attempt in range(retries):
-            exit_code, output = container.exec_run(cmd, environment=env)
-            result = output.decode().strip() if output else ""
+            # demux=True keeps stdout and stderr separate. etcdctl's client emits
+            # transient retry warnings (e.g. "request timed out", later retried
+            # successfully) to stderr even when the command ultimately exits 0;
+            # merging them would corrupt the returned key value.
+            exit_code, output = container.exec_run(cmd, environment=env, demux=True)
+            stdout_b, stderr_b = output if isinstance(output, tuple) else (output, None)
+            stdout = stdout_b.decode().strip() if stdout_b else ""
+            stderr = stderr_b.decode().strip() if stderr_b else ""
             if exit_code == 0:
-                return result
-            last_err = RuntimeError(f"etcdctl {args} on {node_name} failed (exit {exit_code}): {result}")
-            if attempt < retries - 1 and "deadline exceeded" in result.lower():
+                return stdout
+            detail = stderr or stdout
+            last_err = RuntimeError(f"etcdctl {args} on {node_name} failed (exit {exit_code}): {detail}")
+            if attempt < retries - 1 and "deadline exceeded" in detail.lower():
                 time.sleep(retry_delay)
                 continue
             raise last_err
