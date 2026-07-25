@@ -17,8 +17,9 @@ services:
       PATRONI_RETRY_TIMEOUT: "10"
       PATRONI_MASTER_START_TIMEOUT: "60"
       FNF_COOLDOWN_SECS: "120"
-      # System-ID self-heal wipe is opt-in in production (default off). The EC4b
-      # scenario exercises the wipe/rejoin path, so enable it for tests.
+      # Keep discovery tests fast; production retains the longer default.
+      ETCD_JOIN_MAX_RETRIES: "3"
+      # System-ID self-heal wipe is opt-in in production (default off).
       ALLOW_PG_DATA_WIPE: "true"
       PG_WIPE_COOLDOWN_SECS: "60"
 
@@ -31,6 +32,7 @@ services:
       PATRONI_RETRY_TIMEOUT: "10"
       PATRONI_MASTER_START_TIMEOUT: "60"
       FNF_COOLDOWN_SECS: "120"
+      ETCD_JOIN_MAX_RETRIES: "3"
       ALLOW_PG_DATA_WIPE: "true"
       PG_WIPE_COOLDOWN_SECS: "60"
 
@@ -43,5 +45,6 @@ services:
       PATRONI_RETRY_TIMEOUT: "10"
       PATRONI_MASTER_START_TIMEOUT: "60"
       FNF_COOLDOWN_SECS: "120"
+      ETCD_JOIN_MAX_RETRIES: "3"
       ALLOW_PG_DATA_WIPE: "true"
       PG_WIPE_COOLDOWN_SECS: "60"

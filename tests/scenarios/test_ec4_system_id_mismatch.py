@@ -15,16 +15,11 @@ Two production scenarios are covered:
     it updates /initialize to the primary's system ID so crash-looping
     replicas can rejoin without touching their PG data.
 
-  EC4b – Node with wrong-epoch PG data (Case 2 in checkPatroniSystemID)
-    A node is replaced and bootstraps a fresh PG cluster (or restores from a
-    snapshot of a different cluster), giving it a system ID that doesn't
-    match /initialize.  The daemon detects that a healthy peer confirms the
-    correct system ID → it wipes local PG data and restarts Patroni, which
-    will pg_basebackup from the primary.
-
-    This scenario is reproduced by spawning a completely fresh test-node4 as
-    the sole cluster member (it gets a new system ID and owns /initialize),
-    then restarting the base nodes that still carry the OLD PG data.
+  EC4b – Isolated fresh node cannot create a competing epoch
+    A completely fresh replacement may temporarily see only itself during
+    high node churn. It must not infer that the cluster is new. Bootstrap is
+    allowed only after every expected peer is reachable and repeatedly
+    confirms empty PostgreSQL and etcd state with the same membership view.
 
 Data-safety note (post-incident hardening):
   The PG data wipe in Case 2 is destructive, so it is now OPT-IN via
@@ -32,15 +27,13 @@ Data-safety note (post-incident hardening):
   PRIMARY (not merely any re-cloned replica) to confirm the authoritative
   system ID before any data is deleted. This prevents a stray/empty epoch —
   or a replica cloned from one — from causing surviving nodes to wipe real
-  data. The test enables ALLOW_PG_DATA_WIPE (see docker-compose.test.yml) to
-  exercise the wipe/rejoin path; test-node4 is the live primary that confirms
-  the new system ID.
+  data. Neither scenario in this module relies on deleting PostgreSQL data.
 
 Timing with test overrides (UPDATE_INTERVAL=15s):
   EC4a: inject bad key → kill/restart replica → daemon corrects key in
         ≤2 update cycles (~30s) → Patroni rejoins.  Timeout: 180s.
-  EC4b: fresh node bootstraps (~90s) → base nodes restart → daemon detects
-        mismatch, wipes PG, pg_basebackup completes.  Timeout: 480s.
+  EC4b: isolated fresh node remains uninitialized while the original cluster
+        is unavailable; the original epoch recovers unchanged.
 """
 
 import subprocess
@@ -145,30 +138,17 @@ def test_stale_initialize_key_is_healed(cluster: ClusterManager, mock_api: MockA
 
 
 # ---------------------------------------------------------------------------
-# EC4b – node with wrong-epoch PG data wipes itself and rejoins
+# EC4b – isolated fresh node cannot bootstrap a competing epoch
 # ---------------------------------------------------------------------------
 
 
-def test_wrong_epoch_pg_data_triggers_wipe_and_rejoin(
+def test_fresh_isolated_node_cannot_bootstrap_competing_epoch(
     cluster: ClusterManager, mock_api: MockApiClient
 ):
     """
-    EC4b: A fresh replacement node bootstraps a new PG cluster (new system ID
-    and /initialize key).  The surviving base nodes carry PG data from the old
-    cluster epoch and cannot join via Patroni.  The daemon detects that their
-    local PG system ID differs from /initialize and wipes their data so Patroni
-    can pg_basebackup from the new primary.
-
-    Setup
-    -----
-    1. Kill all three base nodes so the cluster has no quorum.
-    2. Mock API exposes only test-node4 so it bootstraps a fresh single-member
-       etcd and PG cluster (new system ID Y, /initialize = Y).
-    3. Add base node IPs back to mock API and restart the base nodes.
-       They still have old PG data (system ID X ≠ Y).
-    4. The daemon on each base node detects X ≠ Y while test-node4 (or another
-       base node that already healed) confirms Y → wipes PG data → Patroni
-       pg_basebackups → node rejoins.
+    EC4b: A fresh node that temporarily sees only itself must remain
+    uninitialized. Once it is removed and the original nodes return, the
+    original PostgreSQL epoch must recover unchanged.
     """
     cluster.wait_for_healthy(expected_members=3, timeout=120)
     cluster.wait_for_etcd_ready("postgres-node1", timeout=60)
@@ -181,40 +161,35 @@ def test_wrong_epoch_pg_data_triggers_wipe_and_rejoin(
         cluster.kill_node(node)
     time.sleep(5)
 
-    # --- Spawn a completely fresh replacement node ---
-    # test-node4 has no volumes: etcd and PG data are both empty.
-    # With only itself in the mock API it will be the bootstrap candidate,
-    # perform initdb (new system ID Y) and set /initialize = Y.
+    # test-node4 has no volumes and temporarily sees only itself. This is
+    # ambiguous (first deployment vs partition/churn), so automatic bootstrap
+    # must fail closed.
     mock_api.set_nodes(["172.20.0.13"])
     cluster.spawn_fresh_node("test-node4")
 
-    # Wait until test-node4 is healthy as a single-node cluster.
-    cluster.wait_for_healthy(expected_members=1, timeout=180)
-
-    new_sysid = cluster.etcd_get("test-node4", "/patroni/postgres-cluster/initialize")
-    assert new_sysid, "test-node4 must set /initialize after bootstrap"
-    assert new_sysid != original_sysid, (
-        "test-node4 should have bootstrapped a NEW system ID; "
-        f"both old and new are {original_sysid!r}"
+    time.sleep(75)
+    node4 = cluster._container("test-node4")
+    result = node4.exec_run(
+        ["sh", "-c", "test ! -e /var/lib/postgresql/data/global/pg_control"]
     )
+    assert result.exit_code == 0, (
+        "isolated fresh node created PostgreSQL data; automatic bootstrap "
+        f"must remain blocked: {result.output.decode(errors='replace')}"
+    )
+    assert cluster.patroni_status("test-node4") is None
 
-    # --- Restart base nodes with their stale PG data ---
-    mock_api.set_nodes(["172.20.0.10", "172.20.0.11", "172.20.0.12", "172.20.0.13"])
+    cluster.remove_fresh_node("test-node4")
+    mock_api.set_nodes(["172.20.0.10", "172.20.0.11", "172.20.0.12"])
     for node in ["postgres-node1", "postgres-node2", "postgres-node3"]:
         cluster.start_node(node)
 
-    # --- Expect auto-heal ---
-    # Each base node's daemon detects its local PG system ID (original_sysid) ≠
-    # /initialize (new_sysid), finds test-node4 (or a peer that already healed)
-    # confirming new_sysid, wipes PG data, restarts Patroni → pg_basebackup.
-    cluster.wait_for_healthy(expected_members=4, timeout=480)
+    cluster.wait_for_healthy(expected_members=3, timeout=300)
 
-    # All four nodes must carry the NEW system ID after healing.
-    all_nodes = ["postgres-node1", "postgres-node2", "postgres-node3", "test-node4"]
-    for node in all_nodes:
+    for node in ["postgres-node1", "postgres-node2", "postgres-node3"]:
         node_sysid = cluster.get_pg_system_id(node)
-        assert node_sysid == new_sysid, (
-            f"{node} system ID {node_sysid!r} should be {new_sysid!r} after healing"
+        assert node_sysid == original_sysid, (
+            f"{node} system ID changed from preserved epoch {original_sysid!r} "
+            f"to {node_sysid!r}"
         )
 
     rows = cluster.exec_sql("SELECT 1")
