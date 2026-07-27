@@ -67,7 +67,7 @@ Key Points:
   - Use the official Docker image: `runonflux/flux-pg-cluster:latest` (PostgreSQL 14).
   - For PostgreSQL 15, use `runonflux/flux-pg-cluster:pg15` with **fresh volumes** on all nodes.
   - Add persistent Container Data for PostgreSQL at `/var/lib/postgresql/data`.
-  - **If you enable the built-in backups, add a separate persistent Container Data volume at `/var/lib/postgresql/backups`.** This is a sibling of the PostgreSQL data directory, so persisting `/var/lib/postgresql/data` does not persist backups. Without this volume, backups disappear when Flux replaces or reschedules the container.
+  - **If you enable the built-in backups, add a separate persistent Container Data volume at `/var/lib/postgresql/backups`.** This is a sibling of the PostgreSQL data directory, so persisting `/var/lib/postgresql/data` does not persist backups. Without this volume, backups disappear when Flux replaces or reschedules the container. The image initializes the mounted directory with ownership for the `postgres` user at startup.
   - Add these ports to the `Cont. Ports` field: `[5432,5433,8008,2379,2380]`.
   - Using the `Ports` field, map those ports to new ones, for example: `[15432,15433,18008,12379,12380]`.
   - For the `Domains` field, add this: `["","","","",""]`.
