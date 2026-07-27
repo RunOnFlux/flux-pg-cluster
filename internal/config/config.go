@@ -17,8 +17,8 @@ type Config struct {
 	AppName      string
 	PatroniScope string
 	MyName       string
-	MyIP     string
-	HostName string
+	MyIP         string
+	HostName     string
 
 	PostgresDB                  string
 	PostgresSuperuserPassword   string
@@ -29,6 +29,7 @@ type Config struct {
 	SSLCertValidityDays int
 
 	HostPostgresPort   int
+	HostProxyPort      int
 	HostPatroniAPIPort int
 	HostEtcdClientPort int
 	HostEtcdPeerPort   int
@@ -51,6 +52,9 @@ type Config struct {
 	UpdateIntervalSeconds         int
 	DesiredStateStabilityCycles   int
 	EtcdUnavailableRecoveryCycles int
+	BootstrapPeerConfirmCycles    int
+	BootstrapPeerProbeInterval    int
+	BootstrapPeerProbeTimeout     int
 
 	PatroniTTL                   int
 	PatroniLoopWait              int
@@ -104,32 +108,31 @@ func envBool(key string, def bool) bool {
 // matching entrypoint.sh.
 func FromEnv() *Config {
 	c := &Config{
-		AppName:                       env("APP_NAME", "postgres-cluster"),
-		PatroniScope:                  env("PATRONI_SCOPE", "postgres-cluster"),
-		PostgresDB:                    env("POSTGRES_DB", "postgres"),
-		PostgresSuperuserPassword:     env("POSTGRES_SUPERUSER_PASSWORD", "postgres"),
-		PostgresReplicationPassword:   env("POSTGRES_REPLICATION_PASSWORD", "replication"),
-		SSLEnabled:                    envBool("SSL_ENABLED", false),
-		SSLPassphrase:                 env("SSL_PASSPHRASE", ""),
-		SSLCertValidityDays:           envInt("SSL_CERT_VALIDITY_DAYS", 3650),
-		HostPostgresPort:              envInt("HOST_POSTGRES_PORT", 5432),
-		HostPatroniAPIPort:            envInt("HOST_PATRONI_API_PORT", 8008),
-		HostEtcdClientPort:            envInt("HOST_ETCD_CLIENT_PORT", 2379),
-		HostEtcdPeerPort:              envInt("HOST_ETCD_PEER_PORT", 2380),
-		PostgresPort:                  envInt("POSTGRES_PORT", 5432),
-		PatroniAPIPort:                envInt("PATRONI_API_PORT", 8008),
-		EtcdClientPort:                envInt("ETCD_CLIENT_PORT", 2379),
-		EtcdPeerPort:                  envInt("ETCD_PEER_PORT", 2380),
-		AllowNewClusterBootstrap:      envBool("ALLOW_NEW_CLUSTER_BOOTSTRAP", false),
-		AllowAnyNodeBootstrap:         envBool("ALLOW_ANY_NODE_BOOTSTRAP", false),
+		AppName:                     env("APP_NAME", "postgres-cluster"),
+		PatroniScope:                env("PATRONI_SCOPE", "postgres-cluster"),
+		PostgresDB:                  env("POSTGRES_DB", "postgres"),
+		PostgresSuperuserPassword:   env("POSTGRES_SUPERUSER_PASSWORD", "postgres"),
+		PostgresReplicationPassword: env("POSTGRES_REPLICATION_PASSWORD", "replication"),
+		SSLEnabled:                  envBool("SSL_ENABLED", false),
+		SSLPassphrase:               env("SSL_PASSPHRASE", ""),
+		SSLCertValidityDays:         envInt("SSL_CERT_VALIDITY_DAYS", 3650),
+		HostPostgresPort:            envInt("HOST_POSTGRES_PORT", 5432),
+		HostProxyPort:               envInt("HOST_PROXY_PORT", 0),
+		HostPatroniAPIPort:          envInt("HOST_PATRONI_API_PORT", 8008),
+		HostEtcdClientPort:          envInt("HOST_ETCD_CLIENT_PORT", 2379),
+		HostEtcdPeerPort:            envInt("HOST_ETCD_PEER_PORT", 2380),
+		PostgresPort:                envInt("POSTGRES_PORT", 5432),
+		PatroniAPIPort:              envInt("PATRONI_API_PORT", 8008),
+		EtcdClientPort:              envInt("ETCD_CLIENT_PORT", 2379),
+		EtcdPeerPort:                envInt("ETCD_PEER_PORT", 2380),
+		AllowNewClusterBootstrap:    envBool("ALLOW_NEW_CLUSTER_BOOTSTRAP", false),
+		AllowAnyNodeBootstrap:       envBool("ALLOW_ANY_NODE_BOOTSTRAP", false),
 		// AUTO_BOOTSTRAP_IF_FRESH lets the deterministic candidate initdb a new
-		// cluster when it is genuinely fresh (empty etcd AND empty PG) and can
-		// reach no peers. This is required for first-boot auto-formation, so it
-		// defaults to true. The catastrophic failure mode is NOT this bootstrap
-		// itself but the system-ID self-heal deleting real data to "converge" on a
-		// mistaken fresh epoch — which is now prevented by ALLOW_PG_DATA_WIPE below.
-		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", true),
-		DeadClusterRecovery:           envBool("DEAD_CLUSTER_RECOVERY", true),
+		// cluster only after every expected peer repeatedly and explicitly
+		// confirms empty PostgreSQL and etcd state with the same membership view.
+		// Unreachable or ambiguous peers always block this automatic path.
+		AutoBootstrapIfFresh: envBool("AUTO_BOOTSTRAP_IF_FRESH", true),
+		DeadClusterRecovery:  envBool("DEAD_CLUSTER_RECOVERY", true),
 		// ALLOW_PG_DATA_WIPE defaults to FALSE. The updater's system-ID self-heal
 		// will never delete /var/lib/postgresql/data unless this is explicitly set;
 		// instead it logs a loud, actionable error and leaves the data intact. This
@@ -140,6 +143,9 @@ func FromEnv() *Config {
 		UpdateIntervalSeconds:         envInt("UPDATE_INTERVAL_SECONDS", 60),
 		DesiredStateStabilityCycles:   envInt("DESIRED_STATE_STABILITY_CYCLES", 3),
 		EtcdUnavailableRecoveryCycles: envInt("ETCD_UNAVAILABLE_RECOVERY_CYCLES", 2),
+		BootstrapPeerConfirmCycles:    envInt("BOOTSTRAP_PEER_CONFIRM_CYCLES", 3),
+		BootstrapPeerProbeInterval:    envInt("BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS", 10),
+		BootstrapPeerProbeTimeout:     envInt("BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS", 5),
 		PatroniTTL:                    envInt("PATRONI_TTL", 30),
 		PatroniLoopWait:               envInt("PATRONI_LOOP_WAIT", 10),
 		PatroniRetryTimeout:           envInt("PATRONI_RETRY_TIMEOUT", 30),
@@ -156,6 +162,12 @@ func FromEnv() *Config {
 		ProxyEnabled:                  envBool("PROXY_ENABLED", true),
 		ProxyListenPort:               envInt("PROXY_LISTEN_PORT", 5433),
 		ProxyHealthInterval:           envInt("PROXY_HEALTH_INTERVAL_SECONDS", 3),
+	}
+	if c.HostProxyPort <= 0 {
+		// Flux deployments conventionally map 5432/5433 to consecutive host
+		// ports (for example 15432/15433). HOST_PROXY_PORT remains explicitly
+		// configurable for deployments with a different mapping.
+		c.HostProxyPort = c.HostPostgresPort + (c.ProxyListenPort - c.PostgresPort)
 	}
 	return c
 }
@@ -208,6 +220,8 @@ func (c *Config) applyKV(key, val string) {
 		c.PostgresReplicationPassword = val
 	case "HOST_POSTGRES_PORT":
 		c.HostPostgresPort, _ = strconv.Atoi(val)
+	case "HOST_PROXY_PORT":
+		c.HostProxyPort, _ = strconv.Atoi(val)
 	case "HOST_PATRONI_API_PORT":
 		c.HostPatroniAPIPort, _ = strconv.Atoi(val)
 	case "HOST_ETCD_CLIENT_PORT":
@@ -242,6 +256,12 @@ func (c *Config) applyKV(key, val string) {
 		c.DesiredStateStabilityCycles, _ = strconv.Atoi(val)
 	case "ETCD_UNAVAILABLE_RECOVERY_CYCLES":
 		c.EtcdUnavailableRecoveryCycles, _ = strconv.Atoi(val)
+	case "BOOTSTRAP_PEER_CONFIRM_CYCLES":
+		c.BootstrapPeerConfirmCycles, _ = strconv.Atoi(val)
+	case "BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS":
+		c.BootstrapPeerProbeInterval, _ = strconv.Atoi(val)
+	case "BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS":
+		c.BootstrapPeerProbeTimeout, _ = strconv.Atoi(val)
 	case "PATRONI_TTL":
 		c.PatroniTTL, _ = strconv.Atoi(val)
 	case "PATRONI_LOOP_WAIT":
@@ -280,6 +300,7 @@ func (c *Config) WriteClusterEnv() error {
 		"ETCD_HOSTS=" + c.EtcdHosts,
 		"ETCD_INITIAL_CLUSTER=" + c.EtcdInitialCluster,
 		fmt.Sprintf("HOST_POSTGRES_PORT=%d", c.HostPostgresPort),
+		fmt.Sprintf("HOST_PROXY_PORT=%d", c.HostProxyPort),
 		fmt.Sprintf("HOST_PATRONI_API_PORT=%d", c.HostPatroniAPIPort),
 		fmt.Sprintf("HOST_ETCD_CLIENT_PORT=%d", c.HostEtcdClientPort),
 		fmt.Sprintf("HOST_ETCD_PEER_PORT=%d", c.HostEtcdPeerPort),
@@ -306,6 +327,9 @@ func (c *Config) WriteClusterEnv() error {
 		fmt.Sprintf("UPDATE_INTERVAL_SECONDS=%d", c.UpdateIntervalSeconds),
 		fmt.Sprintf("DESIRED_STATE_STABILITY_CYCLES=%d", c.DesiredStateStabilityCycles),
 		fmt.Sprintf("ETCD_UNAVAILABLE_RECOVERY_CYCLES=%d", c.EtcdUnavailableRecoveryCycles),
+		fmt.Sprintf("BOOTSTRAP_PEER_CONFIRM_CYCLES=%d", c.BootstrapPeerConfirmCycles),
+		fmt.Sprintf("BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS=%d", c.BootstrapPeerProbeInterval),
+		fmt.Sprintf("BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS=%d", c.BootstrapPeerProbeTimeout),
 		fmt.Sprintf("PATRONI_TTL=%d", c.PatroniTTL),
 		fmt.Sprintf("PATRONI_LOOP_WAIT=%d", c.PatroniLoopWait),
 		fmt.Sprintf("PATRONI_RETRY_TIMEOUT=%d", c.PatroniRetryTimeout),

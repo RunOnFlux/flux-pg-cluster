@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -101,7 +103,7 @@ func runProxy(args []string) {
 				continue
 			}
 		}
-		go handleProxyConn(conn, primaryIP.Load().(string), cfg.MyIP, *targetPort, cfg.PostgresPort)
+		go handleProxyConn(conn, primaryIP.Load().(string), cfg, *targetPort)
 	}
 }
 
@@ -243,17 +245,30 @@ func indexByte(s string, b byte) int {
 // handleProxyConn dials the current primary and bidirectionally copies bytes.
 // When the primary is this node, dial via localhost and the container Postgres
 // port to avoid hairpin NAT failures on the public IP.
-func handleProxyConn(client net.Conn, primaryIP, myIP string, hostPostgresPort, postgresPort int) {
+func handleProxyConn(client net.Conn, primaryIP string, cfg *config.Config, hostPostgresPort int) {
 	defer client.Close()
+	reader := bufio.NewReader(client)
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	prefix, err := reader.Peek(4)
+	_ = client.SetReadDeadline(time.Time{})
+	if err == nil && string(prefix) == "GET " {
+		req, readErr := http.ReadRequest(reader)
+		if readErr != nil {
+			return
+		}
+		defer req.Body.Close()
+		writeIdentityResponse(&connResponseWriter{Conn: client}, cfg, req)
+		return
+	}
 	if primaryIP == "" {
 		pkglog.Warnf("proxy: rejecting connection from %s — no primary known yet", client.RemoteAddr())
 		return
 	}
 	dialHost := primaryIP
 	dialPort := hostPostgresPort
-	if myIP != "" && primaryIP == myIP {
+	if cfg.MyIP != "" && primaryIP == cfg.MyIP {
 		dialHost = "127.0.0.1"
-		dialPort = postgresPort
+		dialPort = cfg.PostgresPort
 	}
 	target := fmt.Sprintf("%s:%d", dialHost, dialPort)
 	upstream, err := net.DialTimeout("tcp", target, 5*time.Second)
@@ -264,7 +279,43 @@ func handleProxyConn(client net.Conn, primaryIP, myIP string, hostPostgresPort, 
 	defer upstream.Close()
 
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(upstream, client); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(upstream, reader); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(client, upstream); done <- struct{}{} }()
 	<-done
+}
+
+// connResponseWriter is the minimal http.ResponseWriter needed to serve the
+// identity document on the existing TCP proxy listener.
+type connResponseWriter struct {
+	net.Conn
+	header      http.Header
+	wroteHeader bool
+}
+
+func (w *connResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *connResponseWriter) WriteHeader(statusCode int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	_, _ = fmt.Fprintf(w.Conn, "HTTP/1.1 %d %s\r\n", statusCode, http.StatusText(statusCode))
+	for key, values := range w.Header() {
+		for _, value := range values {
+			_, _ = fmt.Fprintf(w.Conn, "%s: %s\r\n", key, value)
+		}
+	}
+	_, _ = io.WriteString(w.Conn, "Connection: close\r\n\r\n")
+}
+
+func (w *connResponseWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.Conn.Write(p)
 }

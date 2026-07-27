@@ -110,16 +110,11 @@ func runEtcdStart(args []string) {
 		pkglog.Infof("no data directory — attempting to join existing cluster")
 		candidate := bootstrapCandidate(cfg.EtcdInitialCluster)
 		isCandidate := cfg.MyName == candidate
-		// Candidate uses short retry — if no peer is up, it's a cold start and
-		// the candidate should bootstrap quickly so others can join.
-		// Non-candidates retry patiently (much longer) and never bootstrap on
-		// their own — they must always join an existing cluster (split-brain safe).
+		// Every node waits through the configured discovery window. In
+		// particular, the candidate must not infer "new deployment" from a few
+		// fast connection failures during Flux placement churn.
 		maxRetries := cfg.EtcdJoinMaxRetries
-		if isCandidate {
-			if maxRetries > 3 {
-				maxRetries = 3
-			}
-		} else if maxRetries < 60 {
+		if !isCandidate && maxRetries < 60 {
 			maxRetries = 60
 		}
 		state, joinedInitial, err := tryJoinExisting(cfg, sslOpts, otherIPs, forceRejoin, maxRetries)
@@ -414,27 +409,32 @@ func rebuildInitialCluster(members []etcdmgr.Member, myName, myPeerURL string) s
 }
 
 // decideBootstrap implements the safety guards for bootstrapping a brand-new
-// multi-member cluster: only allowed when data dirs are empty and either the
-// caller is the deterministic candidate or override flags are set.
+// cluster. Automatic bootstrap requires unanimous, repeated empty-state
+// confirmation from every expected peer. Unreachable peers are never treated
+// as empty.
 func decideBootstrap(cfg *config.Config, dataDir string) string {
 	expectedCount := len(strings.Split(cfg.EtcdInitialCluster, ","))
-	if expectedCount <= 1 {
-		pkglog.Infof("single-member configuration — bootstrapping as new")
-		return "new"
-	}
-
 	etcdDataEmpty := !fileExists(dataDir + "/member/snap/db")
 	pgDataEmpty := !dirExists("/var/lib/postgresql/data/global")
+	strictlyEmpty := directoryIsEmpty(dataDir) && directoryIsEmpty("/var/lib/postgresql/data")
 
 	candidate := bootstrapCandidate(cfg.EtcdInitialCluster)
 
 	if !cfg.AllowNewClusterBootstrap {
-		if cfg.AutoBootstrapIfFresh && etcdDataEmpty && pgDataEmpty {
+		if cfg.AutoBootstrapIfFresh && etcdDataEmpty && pgDataEmpty && strictlyEmpty {
+			if expectedCount <= 1 {
+				pkglog.Errorf("FRESH BOOTSTRAP BLOCKED: single-member empty state cannot prove this is a first deployment")
+				return ""
+			}
 			if cfg.MyName != candidate {
 				pkglog.Errorf("fresh non-candidate %s reached bootstrap path — refusing (only candidate %s may bootstrap)", cfg.MyName, candidate)
 				return ""
 			}
-			pkglog.Infof("fresh multi-member install detected on deterministic candidate — auto-bootstrap")
+			if !confirmFreshClusterWithPeers(cfg) {
+				pkglog.Errorf("fresh bootstrap denied: peer evidence was incomplete or unsafe")
+				return ""
+			}
+			pkglog.Infof("fresh multi-member install unanimously confirmed — auto-bootstrap")
 			return "new"
 		}
 		// Dead cluster recovery: candidate lost its etcd data but has PG data,
@@ -447,8 +447,8 @@ func decideBootstrap(cfg *config.Config, dataDir string) string {
 			return "new"
 		}
 		pkglog.Errorf("multi-member cluster, no peer found, refusing automatic bootstrap (split-brain prevention)")
-		pkglog.Errorf("conditions: candidate=%v etcd_empty=%v pg_empty=%v auto_fresh=%v dead_recovery=%v",
-			cfg.MyName == candidate, etcdDataEmpty, pgDataEmpty, cfg.AutoBootstrapIfFresh, cfg.DeadClusterRecovery)
+		pkglog.Errorf("conditions: candidate=%v etcd_empty=%v pg_empty=%v dirs_strictly_empty=%v auto_fresh=%v dead_recovery=%v",
+			cfg.MyName == candidate, etcdDataEmpty, pgDataEmpty, strictlyEmpty, cfg.AutoBootstrapIfFresh, cfg.DeadClusterRecovery)
 		return ""
 	}
 

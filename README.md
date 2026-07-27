@@ -66,7 +66,8 @@ Key Points:
   - Add a component for PostgreSQL.
   - Use the official Docker image: `runonflux/flux-pg-cluster:latest` (PostgreSQL 14).
   - For PostgreSQL 15, use `runonflux/flux-pg-cluster:pg15` with **fresh volumes** on all nodes.
-  - Set the Container Data for the component to `/var/lib/postgresql/data`.
+  - Add persistent Container Data for PostgreSQL at `/var/lib/postgresql/data`.
+  - **If you enable the built-in backups, add a separate persistent Container Data volume at `/var/lib/postgresql/backups`.** This is a sibling of the PostgreSQL data directory, so persisting `/var/lib/postgresql/data` does not persist backups. Without this volume, backups disappear when Flux replaces or reschedules the container. The image initializes the mounted directory with ownership for the `postgres` user at startup.
   - Add these ports to the `Cont. Ports` field: `[5432,5433,8008,2379,2380]`.
   - Using the `Ports` field, map those ports to new ones, for example: `[15432,15433,18008,12379,12380]`.
   - For the `Domains` field, add this: `["","","","",""]`.
@@ -75,6 +76,7 @@ Key Points:
    ```json
    [
       "HOST_POSTGRES_PORT=15432",
+      "HOST_PROXY_PORT=15433",
       "HOST_PATRONI_API_PORT=18008",
       "HOST_ETCD_CLIENT_PORT=12379",
       "HOST_ETCD_PEER_PORT=12380",
@@ -82,9 +84,14 @@ Key Points:
       "POSTGRES_REPLICATION_PASSWORD=your-replication-password",
       "POSTGRES_DB=your-app-database",
       "SSL_ENABLED=true",
-      "SSL_PASSPHRASE=your-ssl-passphrase"
+      "SSL_PASSPHRASE=your-ssl-passphrase",
+      "ALLOW_NEW_CLUSTER_BOOTSTRAP=false",
+      "AUTO_BOOTSTRAP_IF_FRESH=true",
+      "ALLOW_PG_DATA_WIPE=false"
    ]
    ```
+
+   These are the recommended bootstrap safety defaults for an automatic multi-node deployment. `AUTO_BOOTSTRAP_IF_FRESH=true` forms the initial cluster only after every expected node repeatedly confirms that it is empty; the other two settings prevent an unreachable peer or system-ID mismatch from authorizing a new epoch or deleting PostgreSQL data.
     
 
 2. **Connect from other Flux components**:
@@ -111,6 +118,7 @@ Key Points:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `HOST_POSTGRES_PORT` | Host PostgreSQL port mapping | `5432` |
+| `HOST_PROXY_PORT` | Host mapping for proxy port 5433. Also carries the authenticated pre-bootstrap identity probe. Defaults to the port offset implied by `HOST_POSTGRES_PORT` and `PROXY_LISTEN_PORT` (for example, `15433` when PostgreSQL is `15432`). Set it explicitly for non-consecutive mappings. | derived |
 | `HOST_PATRONI_API_PORT` | Host Patroni REST API port mapping | `8008` |
 | `HOST_ETCD_CLIENT_PORT` | Host etcd client port mapping | `2379` |
 | `HOST_ETCD_PEER_PORT` | Host etcd peer communication port mapping | `2380` |
@@ -125,13 +133,16 @@ Key Points:
 | `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
 | `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
 | `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
-| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Allow creating a new multi-member etcd cluster when no peers are reachable. Keep `false` during normal operations; set `true` only for a deliberate first-time cluster creation, then unset it. | `false` |
+| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Explicitly allow creating a brand-new etcd cluster when no peers are reachable, including an otherwise ambiguous single-node deployment. Keep `false` during normal operations; set `true` only for a deliberate first-time cluster creation, then unset it. | `false` |
 | `ALLOW_ANY_NODE_BOOTSTRAP` | If `true`, bypass deterministic bootstrap-candidate restriction. Keep `false` for safety. | `false` |
-| `AUTO_BOOTSTRAP_IF_FRESH` | If `true`, the deterministic candidate may `initdb` a new cluster when it is genuinely fresh (empty etcd **and** empty PG) and no peer is reachable. Needed for first-boot auto-formation. Data-loss from a mistaken fresh epoch is prevented by `ALLOW_PG_DATA_WIPE` below, not by disabling this. | `true` |
+| `AUTO_BOOTSTRAP_IF_FRESH` | If `true`, the deterministic candidate may create the first cluster only after **every expected peer is reachable** and repeatedly reports empty PostgreSQL and etcd state with the identical app, Patroni scope, and membership view. Unreachable is never treated as empty. Single-node automatic bootstrap is deliberately blocked as ambiguous; use `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` for an intentional single-node first boot. Requires `PROXY_ENABLED=true` on every peer. | `true` |
 | `DEAD_CLUSTER_RECOVERY` | If `true`, the deterministic candidate may bootstrap a new **etcd** cluster when etcd data is lost but **PostgreSQL data is preserved** (etcd-only recovery; PG data is never wiped on this path). | `true` |
 | `ALLOW_PG_DATA_WIPE` | If `true`, the updater may delete `/var/lib/postgresql/data` when this node's PostgreSQL system ID differs from the cluster's authoritative system ID (so Patroni can re-clone via `pg_basebackup`). **Defaults to `false`**: instead of deleting data, the updater logs a loud, actionable error and leaves the data intact for a human to verify. When enabled, the wipe still requires the **live primary** to confirm the authoritative system ID. Only enable temporarily, on a node you have confirmed holds stale data. | `false` |
-| `ETCD_JOIN_MAX_RETRIES` | How many peer-join attempts are made before deciding bootstrap behavior | `12` |
+| `ETCD_JOIN_MAX_RETRIES` | Peer-join attempts made by the deterministic candidate before evaluating bootstrap. Non-candidates wait at least 60 attempts and never bootstrap themselves. | `12` |
 | `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
+| `BOOTSTRAP_PEER_CONFIRM_CYCLES` | Consecutive unanimous peer-empty confirmations required before automatic first bootstrap | `3` |
+| `BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS` | Delay between fresh-state confirmation cycles | `10` |
+| `BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS` | Timeout for each peer identity probe | `5` |
 | `UPDATE_INTERVAL_SECONDS` | Update daemon reconciliation interval | `60` |
 | `DESIRED_STATE_STABILITY_CYCLES` | API desired-state cycles required before membership removal/rewrite | `3` |
 | `ETCD_UNAVAILABLE_RECOVERY_CYCLES` | Consecutive updater cycles with local etcd unavailable before peer-evidence recovery kicks in | `2` |
@@ -157,8 +168,10 @@ Key Points:
 
 ### Split-Brain & Data-Loss Prevention Controls
 
+- **Recommended automatic multi-node settings:** `ALLOW_NEW_CLUSTER_BOOTSTRAP=false`, `AUTO_BOOTSTRAP_IF_FRESH=true`, and `ALLOW_PG_DATA_WIPE=false`.
 - **The updater never deletes PostgreSQL data by default.** `ALLOW_PG_DATA_WIPE` defaults to `false`. When a system-ID mismatch is detected, the updater requires the **live primary** (not just any re-cloned replica) to confirm the authoritative system ID, and even then only logs a loud error rather than wiping — a human must confirm and act. This is the load-bearing guard: even if a stray/empty epoch briefly appears, it can no longer cause surviving nodes to auto-delete real data.
-- Multi-member clusters do not auto-bootstrap as new unless `AUTO_BOOTSTRAP_IF_FRESH=true` (the default enables first-boot formation) or `ALLOW_NEW_CLUSTER_BOOTSTRAP=true`.
+- `AUTO_BOOTSTRAP_IF_FRESH=true` does not infer freshness from timeouts. Every expected node must answer the authenticated identity probe on its mapped proxy port and repeatedly confirm that both data stores are empty. A preserved node, unreachable node, different app/scope, or changing membership view blocks `initdb`.
+- Single-node automatic first bootstrap is intentionally unavailable because an isolated replacement is indistinguishable from a genuinely new deployment. Use the explicit `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` override for that case, then remove it.
 - By default, only one deterministic bootstrap candidate (lowest node name) may bootstrap a new cluster.
 - etcd-only `DEAD_CLUSTER_RECOVERY` preserves PostgreSQL data; it never wipes the PG data directory.
 - Membership removals and `ETCD_INITIAL_CLUSTER` rewrites are gated by desired-state stability to reduce churn-induced drift.
@@ -233,7 +246,7 @@ Set `BACKUP_ENABLED=true` to run the built-in logical-backup agent. Behaviour:
 "BACKUP_MAX_TOTAL_BYTES=0"
 ```
 
-> **Durability note:** `BACKUP_DIR` defaults to a path inside the container. For backups that survive a node loss/reschedule, map `BACKUP_DIR` to a persistent or off-node volume (or sync it externally). For point-in-time recovery beyond a daily dump, layer on continuous WAL archiving (pgBackRest / WAL-G).
+> **Required for durable built-in backups:** when creating the Flux app, add `/var/lib/postgresql/backups` as persistent Container Data. Persisting `/var/lib/postgresql/data` does **not** cover this sibling directory. Without a separate persistent or off-node destination, backup files are lost when the container is replaced or rescheduled. For point-in-time recovery beyond a daily dump, layer on continuous WAL archiving (pgBackRest / WAL-G).
 
 **Restore** from a dump (on a fresh primary):
 

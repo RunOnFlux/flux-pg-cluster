@@ -48,7 +48,7 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install 'patroni[etcd3]' psycopg2-binary cryptography
 
 # Create necessary directories
-RUN mkdir -p /etc/patroni /app /var/log/supervisor /var/lib/postgresql/data /etc/ssl/cluster/{ca,etcd,postgres,patroni}
+RUN mkdir -p /etc/patroni /app /var/log/supervisor /var/lib/postgresql/data /var/lib/postgresql/backups /etc/ssl/cluster/{ca,etcd,postgres,patroni}
 
 # Create postgres user and set permissions
 RUN chown -R postgres:postgres /var/lib/postgresql
@@ -79,5 +79,8 @@ WORKDIR /app
 # 5432 = postgres direct, 8008 = patroni REST, 2379/2380 = etcd, 5433 = primary-routing proxy
 EXPOSE 5432 5433 8008 2379 2380
 
-# Run init then start supervisord
-CMD ["/bin/bash", "-c", "/app/flux-agent init && supervisord -n"]
+# Runtime volumes are mounted after the image is built and may hide directories
+# created above or replace them with root-owned mount points. Recreate the
+# Supervisor log directory and make the configured backup directory writable by
+# the postgres user before init or Supervisor starts.
+CMD ["/bin/bash", "-c", "mkdir -p /var/log/supervisor && install -d -o postgres -g postgres -m 0700 \"${BACKUP_DIR:-/var/lib/postgresql/backups}\" && /app/flux-agent init && exec supervisord -n"]
