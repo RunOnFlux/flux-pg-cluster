@@ -55,7 +55,9 @@ func runBackup(args []string) {
 		pkglog.Infof("BACKUP_ENABLED is not true — backup agent idle (set BACKUP_ENABLED=true to enable)")
 		// Block forever so supervisord treats us as running rather than
 		// crash-looping a process that immediately exits.
-		select {}
+		for {
+			time.Sleep(24 * time.Hour)
+		}
 	}
 
 	cfg := config.FromEnv()

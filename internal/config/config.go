@@ -39,6 +39,7 @@ type Config struct {
 	EtcdPeerPort       int
 
 	EtcdHosts          string // comma-separated IP:port pairs (no scheme)
+	PatroniEtcdHosts   string // node-local Patroni endpoints; self uses loopback
 	EtcdInitialCluster string // comma-separated name=URL pairs
 	ClusterIPs         []string
 
@@ -210,6 +211,8 @@ func (c *Config) applyKV(key, val string) {
 		c.PatroniScope = val
 	case "ETCD_HOSTS":
 		c.EtcdHosts = val
+	case "PATRONI_ETCD_HOSTS":
+		c.PatroniEtcdHosts = val
 	case "ETCD_INITIAL_CLUSTER":
 		c.EtcdInitialCluster = val
 	case "SSL_ENABLED":
@@ -298,6 +301,7 @@ func (c *Config) WriteClusterEnv() error {
 		"MY_NAME=" + c.MyName,
 		"MY_IP=" + c.MyIP,
 		"ETCD_HOSTS=" + c.EtcdHosts,
+		"PATRONI_ETCD_HOSTS=" + c.PatroniEtcdHosts,
 		"ETCD_INITIAL_CLUSTER=" + c.EtcdInitialCluster,
 		fmt.Sprintf("HOST_POSTGRES_PORT=%d", c.HostPostgresPort),
 		fmt.Sprintf("HOST_PROXY_PORT=%d", c.HostProxyPort),

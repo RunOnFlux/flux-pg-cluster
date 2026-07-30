@@ -71,6 +71,7 @@ func runEtcdStart(args []string) {
 		// Fast peer check: avoid starting temp etcd if any peer is reachable
 		// (a stale etcd would emit high-term raft messages and disrupt the cluster).
 		anyPeerReachable := false
+		peerKnowsUs := false
 		for _, ip := range otherIPs {
 			endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
 			ec := etcdmgr.New(endpoint, sslOpts)
@@ -81,6 +82,7 @@ func runEtcdStart(args []string) {
 				anyPeerReachable = true
 				if etcdmgr.FindByName(members, cfg.MyName) != nil {
 					pkglog.Infof("peer %s knows about us", ip)
+					peerKnowsUs = true
 				} else {
 					pkglog.Infof("peer %s does not know about us (we may have been removed)", ip)
 				}
@@ -89,11 +91,16 @@ func runEtcdStart(args []string) {
 		}
 
 		if anyPeerReachable {
-			pkglog.Infof("live peer reachable — wiping local data to force a clean rejoin")
-			if err := wipeDir(*dataDir); err != nil {
-				pkglog.Errorf("wipe data dir: %v", err)
+			if peerKnowsUs {
+				pkglog.Infof("live peer confirms this member — preserving local etcd data")
+				clusterState = "existing"
+			} else {
+				pkglog.Infof("live peer does not recognize this member — wiping local etcd data for a clean rejoin")
+				if err := wipeDir(*dataDir); err != nil {
+					pkglog.Errorf("wipe data dir: %v", err)
+				}
+				forceRejoin = true
 			}
-			forceRejoin = true
 		} else {
 			pkglog.Infof("no peers reachable — starting temp etcd to verify local data...")
 			tempState, err := verifyLocalDataWithTempEtcd(cfg, *dataDir, *clusterToken, sslOpts, otherIPs)
@@ -133,7 +140,12 @@ func runEtcdStart(args []string) {
 				pkglog.Errorf("rejoin was forced after wipe but no peer reachable — refusing unsafe bootstrap")
 				os.Exit(1)
 			}
-			if !isCandidate {
+			// Fresh installation remains restricted to the deterministic
+			// candidate. A data-bearing dead-cluster recovery candidate must be
+			// allowed to reach decideBootstrap regardless of node ordering;
+			// decideBootstrap will require unanimous proof that it is the sole
+			// PostgreSQL authority before returning "new".
+			if !mayEvaluateBootstrap(isCandidate, cfg.DeadClusterRecovery, dirExists("/var/lib/postgresql/data/global")) {
 				pkglog.Errorf("non-candidate %s could not reach any peer after %d attempts — exiting (supervisor will retry)", cfg.MyName, maxRetries)
 				os.Exit(1)
 			}
@@ -182,6 +194,10 @@ func runEtcdStart(args []string) {
 			pkglog.Fatalf("exec etcd: %v", err)
 		}
 	}
+}
+
+func mayEvaluateBootstrap(isDeterministicCandidate, deadClusterRecovery, hasPGData bool) bool {
+	return isDeterministicCandidate || (deadClusterRecovery && hasPGData)
 }
 
 func etcdSSLOpts(cfg *config.Config) []string {
@@ -437,12 +453,21 @@ func decideBootstrap(cfg *config.Config, dataDir string) string {
 			pkglog.Infof("fresh multi-member install unanimously confirmed — auto-bootstrap")
 			return "new"
 		}
-		// Dead cluster recovery: candidate lost its etcd data but has PG data,
-		// and ALL peers were already confirmed unreachable (NoPeersReachable path).
-		// Bootstrapping a fresh 1-node etcd is safe here — pg data is preserved
-		// and Patroni will start from existing data. Other nodes will join after.
-		if cfg.DeadClusterRecovery && etcdDataEmpty && !pgDataEmpty && cfg.MyName == candidate {
-			pkglog.Warnf("DEAD CLUSTER RECOVERY: etcd data lost on all peers, PG data preserved — candidate bootstrapping new etcd cluster to recover")
+		// Dead-cluster recovery is authorized by data ownership, never by node
+		// ordering. Every expected peer must repeatedly identify the same sole
+		// PGDATA-bearing node. Multiple data copies or any unreachable peer block
+		// this path, which prevents a network partition from creating a new epoch.
+		if cfg.DeadClusterRecovery && etcdDataEmpty && !pgDataEmpty {
+			authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
+			if !safe {
+				pkglog.Errorf("DEAD CLUSTER RECOVERY BLOCKED: %s", reason)
+				return ""
+			}
+			if authority.IP != cfg.MyIP {
+				pkglog.Errorf("DEAD CLUSTER RECOVERY BLOCKED: sole authority is %s, not this node", authority.NodeName)
+				return ""
+			}
+			pkglog.Warnf("DEAD CLUSTER RECOVERY AUTHORIZED: %s", reason)
 			pkglog.Warnf("PG data will NOT be wiped; Patroni will start from existing data as primary")
 			return "new"
 		}

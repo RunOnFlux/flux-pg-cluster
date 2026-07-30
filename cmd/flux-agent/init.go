@@ -294,6 +294,10 @@ func buildEtcdConfig(cfg *config.Config) {
 	sort.Strings(ips)
 	cfg.ClusterIPs = ips
 
+	cfg.EtcdHosts, cfg.PatroniEtcdHosts, cfg.EtcdInitialCluster = buildEtcdTopology(cfg, ips)
+}
+
+func buildEtcdTopology(cfg *config.Config, ips []string) (string, string, string) {
 	var hostsParts, initialParts []string
 	for _, ip := range ips {
 		name := nodeNameFromIP(ip)
@@ -302,8 +306,8 @@ func buildEtcdConfig(cfg *config.Config) {
 		hostsParts = append(hostsParts, clientURL)
 		initialParts = append(initialParts, name+"="+peerURL)
 	}
-	cfg.EtcdHosts = strings.Join(hostsParts, ",")
-	cfg.EtcdInitialCluster = strings.Join(initialParts, ",")
+	patroniHosts := fmt.Sprintf("127.0.0.1:%d", cfg.EtcdClientPort)
+	return strings.Join(hostsParts, ","), patroniHosts, strings.Join(initialParts, ",")
 }
 
 func runCertsScript(script string, cfg *config.Config) error {
@@ -379,7 +383,7 @@ func renderPatroniConfig(in, out string, cfg *config.Config, pgBinDir string) er
 	replacements := map[string]string{
 		"__MY_NAME__":                       cfg.MyName,
 		"__MY_IP__":                         cfg.MyIP,
-		"__ETCD_HOSTS__":                    cfg.EtcdHosts,
+		"__PATRONI_ETCD_HOSTS__":            cfg.PatroniEtcdHosts,
 		"__ETCD_PROTOCOL__":                 cfg.EtcdProtocol(),
 		"__HOST_POSTGRES_PORT__":            strconv.Itoa(cfg.HostPostgresPort),
 		"__HOST_PATRONI_API_PORT__":         strconv.Itoa(cfg.HostPatroniAPIPort),

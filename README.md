@@ -136,7 +136,7 @@ Key Points:
 | `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Explicitly allow creating a brand-new etcd cluster when no peers are reachable, including an otherwise ambiguous single-node deployment. Keep `false` during normal operations; set `true` only for a deliberate first-time cluster creation, then unset it. | `false` |
 | `ALLOW_ANY_NODE_BOOTSTRAP` | If `true`, bypass deterministic bootstrap-candidate restriction. Keep `false` for safety. | `false` |
 | `AUTO_BOOTSTRAP_IF_FRESH` | If `true`, the deterministic candidate may create the first cluster only after **every expected peer is reachable** and repeatedly reports empty PostgreSQL and etcd state with the identical app, Patroni scope, and membership view. Unreachable is never treated as empty. Single-node automatic bootstrap is deliberately blocked as ambiguous; use `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` for an intentional single-node first boot. Requires `PROXY_ENABLED=true` on every peer. | `true` |
-| `DEAD_CLUSTER_RECOVERY` | If `true`, the deterministic candidate may bootstrap a new **etcd** cluster when etcd data is lost but **PostgreSQL data is preserved** (etcd-only recovery; PG data is never wiped on this path). | `true` |
+| `DEAD_CLUSTER_RECOVERY` | If `true`, a restored node may rebuild the **etcd/Patroni control plane** only after every expected node repeatedly agrees that it is the **sole** node with valid PostgreSQL data. All other nodes must explicitly report empty PGDATA; an unreachable peer, conflicting membership view, unreadable system ID, or second data-bearing node blocks recovery. | `true` |
 | `ALLOW_PG_DATA_WIPE` | If `true`, the updater may delete `/var/lib/postgresql/data` when this node's PostgreSQL system ID differs from the cluster's authoritative system ID (so Patroni can re-clone via `pg_basebackup`). **Defaults to `false`**: instead of deleting data, the updater logs a loud, actionable error and leaves the data intact for a human to verify. When enabled, the wipe still requires the **live primary** to confirm the authoritative system ID. Only enable temporarily, on a node you have confirmed holds stale data. | `false` |
 | `ETCD_JOIN_MAX_RETRIES` | Peer-join attempts made by the deterministic candidate before evaluating bootstrap. Non-candidates wait at least 60 attempts and never bootstrap themselves. | `12` |
 | `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
@@ -172,11 +172,31 @@ Key Points:
 - **The updater never deletes PostgreSQL data by default.** `ALLOW_PG_DATA_WIPE` defaults to `false`. When a system-ID mismatch is detected, the updater requires the **live primary** (not just any re-cloned replica) to confirm the authoritative system ID, and even then only logs a loud error rather than wiping — a human must confirm and act. This is the load-bearing guard: even if a stray/empty epoch briefly appears, it can no longer cause surviving nodes to auto-delete real data.
 - `AUTO_BOOTSTRAP_IF_FRESH=true` does not infer freshness from timeouts. Every expected node must answer the authenticated identity probe on its mapped proxy port and repeatedly confirm that both data stores are empty. A preserved node, unreachable node, different app/scope, or changing membership view blocks `initdb`.
 - Single-node automatic first bootstrap is intentionally unavailable because an isolated replacement is indistinguishable from a genuinely new deployment. Use the explicit `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` override for that case, then remove it.
-- By default, only one deterministic bootstrap candidate (lowest node name) may bootstrap a new cluster.
-- etcd-only `DEAD_CLUSTER_RECOVERY` preserves PostgreSQL data; it never wipes the PG data directory.
+- Node ordering is used only for a genuinely fresh installation. Recovery authority is selected from unanimously observed PostgreSQL data ownership, never from the lowest IP/name.
+- `DEAD_CLUSTER_RECOVERY` preserves the sole authoritative PostgreSQL data directory. It never selects between multiple data copies and never wipes the authoritative node.
 - Membership removals and `ETCD_INITIAL_CLUSTER` rewrites are gated by desired-state stability to reduce churn-induced drift.
 
 > ⚠️ **Backups are not optional.** This is an HA cluster, not a backup. Replication protects against a node failing, **not** against a bad epoch, an operator mistake, or the failure modes above. Enable the built-in [backup agent](#backups) and/or configure continuous WAL archiving (pgBackRest/WAL-G) before storing anything you care about. Verify restores regularly.
+
+### Recovering the cluster from a backup
+
+The automatic recovery workflow is:
+
+1. Stop or redeploy all cluster nodes.
+2. Restore the selected backup into `/var/lib/postgresql/data` on **one node only**.
+3. Start/redeploy the other expected nodes with genuinely empty PostgreSQL data directories. Keep the same app name, Patroni scope, membership, ports, TLS passphrase, and PostgreSQL passwords on every node.
+4. Start all nodes. Their authenticated identity endpoints must be mutually reachable through the mapped proxy port.
+
+The nodes repeatedly exchange their app/scope, membership view, PGDATA state, and PostgreSQL system identifier. Recovery proceeds only when exactly one node has readable PostgreSQL data and every other expected node explicitly reports empty PGDATA. The authoritative node then:
+
+- rebuilds the single-member etcd control plane and records its restored PostgreSQL system identifier;
+- clears only stale Patroni election/health keys while preserving dynamic configuration;
+- promotes the restored PostgreSQL instance;
+- restores required `pg_hba`, `pg_rewind`, `postgres`, and `replicator` invariants from the configured environment.
+
+The empty nodes join etcd as learners, are promoted after synchronizing, and let Patroni obtain a fresh `pg_basebackup` from the recovered primary. Patroni uses the local `127.0.0.1:2379` etcd endpoint for its own node, avoiding public-port hairpin NAT failures.
+
+Automatic recovery intentionally stops if any node is unreachable, more than one node contains PostgreSQL data (even when the system IDs match), or membership views disagree. In that case, do not enable a bootstrap override: first decide which copy is authoritative and make the other nodes empty. This conservative refusal is what prevents split brain and accidental selection of an older data copy.
 
 ### Synchronous Replication
 
