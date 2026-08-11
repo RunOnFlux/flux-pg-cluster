@@ -4,9 +4,19 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RunOnFlux/flux-pg-cluster/internal/config"
 )
+
+func TestBootstrapRetryDelayOutlivesSupervisorStartupWindow(t *testing.T) {
+	if got := bootstrapRetryDelay(0); got != 2*time.Second {
+		t.Fatalf("minimum retry delay = %s, want 2s", got)
+	}
+	if got := bootstrapRetryDelay(10); got != 10*time.Second {
+		t.Fatalf("configured retry delay = %s, want 10s", got)
+	}
+}
 
 func recoveryTestConfig() *config.Config {
 	return &config.Config{

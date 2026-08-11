@@ -151,6 +151,15 @@ func runEtcdStart(args []string) {
 			}
 			state = decideBootstrap(cfg, *dataDir)
 			if state == "" {
+				// An incomplete Flux view is expected briefly while a deployment is
+				// being placed. Do not exit so quickly that Supervisor exhausts its
+				// startup retries and leaves etcd permanently FATAL before the updater
+				// can write the complete topology to cluster_env. Remaining alive past
+				// Supervisor's startsecs moves us to RUNNING, after which autorestart
+				// continues retrying with freshly loaded configuration.
+				delay := bootstrapRetryDelay(cfg.EtcdJoinRetryDelaySeconds)
+				pkglog.Infof("bootstrap not yet safe — retrying after %s", delay)
+				time.Sleep(delay)
 				os.Exit(1)
 			}
 			clusterState = state
@@ -194,6 +203,16 @@ func runEtcdStart(args []string) {
 			pkglog.Fatalf("exec etcd: %v", err)
 		}
 	}
+}
+
+func bootstrapRetryDelay(configuredSeconds int) time.Duration {
+	// Supervisor's default startsecs is one second. Keep this process alive for
+	// at least two seconds so an intentional safety exit is treated as a runtime
+	// failure and autorestart=true keeps retrying instead of entering FATAL.
+	if configuredSeconds < 2 {
+		configuredSeconds = 2
+	}
+	return time.Duration(configuredSeconds) * time.Second
 }
 
 func mayEvaluateBootstrap(isDeterministicCandidate, deadClusterRecovery, hasPGData bool) bool {
