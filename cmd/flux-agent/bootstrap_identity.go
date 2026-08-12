@@ -42,6 +42,12 @@ type peerIdentityResult struct {
 	Err      error
 }
 
+type recoveryAuthority struct {
+	IP       string
+	NodeName string
+	SystemID string
+}
+
 func localNodeIdentity(cfg *config.Config) nodeIdentity {
 	identity := nodeIdentity{
 		AppName:        cfg.AppName,
@@ -206,6 +212,107 @@ func evaluateFreshPeerEvidence(cfg *config.Config, results []peerIdentityResult)
 		}
 	}
 	return true, "all expected peers explicitly confirmed empty state"
+}
+
+// evaluateRecoveryAuthority permits automatic dead-cluster recovery only when
+// every expected node provides authenticated, mutually consistent evidence and
+// exactly one node owns valid PostgreSQL data. It deliberately does not use
+// etcd state to select the authority: etcd is the control plane being rebuilt,
+// while PGDATA is the data that must be preserved.
+func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results []peerIdentityResult) (recoveryAuthority, bool, string) {
+	expectedPeers := len(otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName))
+	if len(results) != expectedPeers {
+		return recoveryAuthority{}, false, fmt.Sprintf("received %d peer results, expected %d", len(results), expectedPeers)
+	}
+
+	expectedView := membershipNames(cfg.EtcdInitialCluster)
+	all := []peerIdentityResult{{IP: cfg.MyIP, Identity: local}}
+	all = append(all, results...)
+	var authority recoveryAuthority
+	dataNodes := 0
+
+	for _, result := range all {
+		if result.Err != nil {
+			return recoveryAuthority{}, false, fmt.Sprintf("peer %s unreachable or ambiguous: %v", result.IP, result.Err)
+		}
+		identity := result.Identity
+		if identity.AppName != cfg.AppName || identity.PatroniScope != cfg.PatroniScope {
+			return recoveryAuthority{}, false, fmt.Sprintf("node %s belongs to app/scope %q/%q", result.IP, identity.AppName, identity.PatroniScope)
+		}
+		expectedName := nodeNameFromIP(result.IP)
+		if identity.NodeName != expectedName {
+			return recoveryAuthority{}, false, fmt.Sprintf("node %s identifies as %q, expected %q", result.IP, identity.NodeName, expectedName)
+		}
+		if !equalStrings(identity.MembershipView, expectedView) {
+			return recoveryAuthority{}, false, fmt.Sprintf("node %s has membership view %v, expected %v", result.IP, identity.MembershipView, expectedView)
+		}
+		if identity.PGDataEmpty {
+			if identity.PostgresSystemIdentifier != "" {
+				return recoveryAuthority{}, false, fmt.Sprintf("node %s reports empty PGDATA with system ID %s", result.IP, identity.PostgresSystemIdentifier)
+			}
+			continue
+		}
+		if identity.PostgresSystemIdentifier == "" {
+			return recoveryAuthority{}, false, fmt.Sprintf("node %s has PostgreSQL data but its system ID is unreadable", result.IP)
+		}
+		dataNodes++
+		authority = recoveryAuthority{
+			IP:       result.IP,
+			NodeName: identity.NodeName,
+			SystemID: identity.PostgresSystemIdentifier,
+		}
+	}
+
+	if dataNodes != 1 {
+		return recoveryAuthority{}, false, fmt.Sprintf("expected exactly one PostgreSQL data-bearing node, found %d", dataNodes)
+	}
+	return authority, true, fmt.Sprintf("all expected nodes confirmed %s as the sole PostgreSQL authority", authority.NodeName)
+}
+
+func discoverRecoveryAuthority(cfg *config.Config) (recoveryAuthority, bool, string) {
+	otherIPs := otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName)
+	timeout := time.Duration(cfg.BootstrapPeerProbeTimeout) * time.Second
+	if timeout < time.Second {
+		timeout = time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Second)
+	results := probeAllPeerIdentities(ctx, cfg, otherIPs)
+	cancel()
+	return evaluateRecoveryAuthority(cfg, localNodeIdentity(cfg), results)
+}
+
+// confirmRecoveryAuthorityWithPeers requires the same unique authority across
+// repeated probes. This prevents a single transient view during Flux churn
+// from authorizing a new etcd epoch.
+func confirmRecoveryAuthorityWithPeers(cfg *config.Config) (recoveryAuthority, bool, string) {
+	cycles := cfg.BootstrapPeerConfirmCycles
+	if cycles < 1 {
+		cycles = 1
+	}
+	interval := time.Duration(cfg.BootstrapPeerProbeInterval) * time.Second
+	if interval < time.Second {
+		interval = time.Second
+	}
+
+	var confirmed recoveryAuthority
+	for cycle := 1; cycle <= cycles; cycle++ {
+		authority, ok, reason := discoverRecoveryAuthority(cfg)
+		if !ok {
+			return recoveryAuthority{}, false, reason
+		}
+		if cycle > 1 && authority != confirmed {
+			return recoveryAuthority{}, false, fmt.Sprintf(
+				"recovery authority changed between probes: %#v != %#v", confirmed, authority)
+		}
+		confirmed = authority
+		pkglog.Infof("recovery authority confirmation %d/%d: %s (%s)",
+			cycle, cycles, authority.NodeName, authority.SystemID)
+		if cycle < cycles {
+			time.Sleep(interval)
+		}
+	}
+	return confirmed, true, fmt.Sprintf(
+		"all expected nodes repeatedly confirmed %s as the sole PostgreSQL authority", confirmed.NodeName)
 }
 
 func equalStrings(a, b []string) bool {

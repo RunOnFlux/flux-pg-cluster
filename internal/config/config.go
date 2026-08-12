@@ -39,6 +39,7 @@ type Config struct {
 	EtcdPeerPort       int
 
 	EtcdHosts          string // comma-separated IP:port pairs (no scheme)
+	PatroniEtcdHosts   string // node-local Patroni endpoints; self uses loopback
 	EtcdInitialCluster string // comma-separated name=URL pairs
 	ClusterIPs         []string
 
@@ -193,9 +194,25 @@ func LoadClusterEnv(c *Config) error {
 		if !ok {
 			continue
 		}
-		c.applyKV(key, val)
+		c.applyKV(key, decodeShellValue(val))
 	}
 	return scanner.Err()
+}
+
+// shellQuoteValue returns a value that is safe to source from a POSIX shell.
+// cluster_env is consumed both by Go and by Supervisor's shell commands, so
+// credentials must not be allowed to introduce operators such as &, *, or ;.
+func shellQuoteValue(val string) string {
+	return "'" + strings.ReplaceAll(val, "'", "'\"'\"'") + "'"
+}
+
+// decodeShellValue reverses shellQuoteValue for Go consumers of cluster_env.
+// Unquoted values remain supported for files written by older releases.
+func decodeShellValue(val string) string {
+	if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
+		return strings.ReplaceAll(val[1:len(val)-1], "'\"'\"'", "'")
+	}
+	return val
 }
 
 func (c *Config) applyKV(key, val string) {
@@ -210,6 +227,8 @@ func (c *Config) applyKV(key, val string) {
 		c.PatroniScope = val
 	case "ETCD_HOSTS":
 		c.EtcdHosts = val
+	case "PATRONI_ETCD_HOSTS":
+		c.PatroniEtcdHosts = val
 	case "ETCD_INITIAL_CLUSTER":
 		c.EtcdInitialCluster = val
 	case "SSL_ENABLED":
@@ -298,6 +317,7 @@ func (c *Config) WriteClusterEnv() error {
 		"MY_NAME=" + c.MyName,
 		"MY_IP=" + c.MyIP,
 		"ETCD_HOSTS=" + c.EtcdHosts,
+		"PATRONI_ETCD_HOSTS=" + c.PatroniEtcdHosts,
 		"ETCD_INITIAL_CLUSTER=" + c.EtcdInitialCluster,
 		fmt.Sprintf("HOST_POSTGRES_PORT=%d", c.HostPostgresPort),
 		fmt.Sprintf("HOST_PROXY_PORT=%d", c.HostProxyPort),
@@ -308,8 +328,8 @@ func (c *Config) WriteClusterEnv() error {
 		fmt.Sprintf("PATRONI_API_PORT=%d", c.PatroniAPIPort),
 		fmt.Sprintf("ETCD_CLIENT_PORT=%d", c.EtcdClientPort),
 		fmt.Sprintf("ETCD_PEER_PORT=%d", c.EtcdPeerPort),
-		"POSTGRES_SUPERUSER_PASSWORD=" + c.PostgresSuperuserPassword,
-		"POSTGRES_REPLICATION_PASSWORD=" + c.PostgresReplicationPassword,
+		"POSTGRES_SUPERUSER_PASSWORD=" + shellQuoteValue(c.PostgresSuperuserPassword),
+		"POSTGRES_REPLICATION_PASSWORD=" + shellQuoteValue(c.PostgresReplicationPassword),
 		fmt.Sprintf("PATRONI_SYNCHRONOUS_MODE=%s", strconv.FormatBool(c.PatroniSynchronousMode)),
 		fmt.Sprintf("PATRONI_SYNCHRONOUS_MODE_STRICT=%s", strconv.FormatBool(c.PatroniSynchronousModeStrict)),
 		fmt.Sprintf("PATRONI_SYNCHRONOUS_NODE_COUNT=%d", c.PatroniSynchronousNodeCount),

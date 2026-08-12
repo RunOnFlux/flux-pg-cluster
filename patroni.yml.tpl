@@ -15,7 +15,11 @@ restapi:
   cafile: /etc/ssl/cluster/ca/ca.crt
 
 etcd3:
-  hosts: __ETCD_HOSTS__
+  hosts: __PATRONI_ETCD_HOSTS__
+  # Flux host-port mappings may not support hairpin connections. Treat this
+  # node-specific list as fixed so Patroni does not replace its loopback entry
+  # with etcd's externally advertised URL during topology discovery.
+  use_proxies: true
   protocol: __ETCD_PROTOCOL__
   cacert: /etc/ssl/cluster/ca/ca.crt
   cert: /etc/ssl/cluster/etcd/client.crt

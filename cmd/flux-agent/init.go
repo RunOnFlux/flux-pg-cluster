@@ -39,12 +39,23 @@ func runInit(args []string) {
 
 	cfg := config.FromEnv()
 
-	// Resolve APP_NAME from Flux hostinfo if available
-	if appName := tryGetHostInfoAppName(); appName != "" {
-		cfg.AppName = appName
-		pkglog.Infof("APP_NAME resolved from hostinfo API: %s", appName)
+	// An explicitly supplied APP_NAME is authoritative. Otherwise retry Flux
+	// hostinfo because its local service may not be ready when the container
+	// first starts; a one-shot failure would persist the generic fallback into
+	// cluster_env and cause peer identity HMACs to disagree across nodes.
+	if explicitAppName := os.Getenv("APP_NAME"); explicitAppName != "" {
+		cfg.AppName = explicitAppName
+		pkglog.Infof("APP_NAME from environment: %s", cfg.AppName)
 	} else {
-		pkglog.Infof("APP_NAME from env/default: %s", cfg.AppName)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		appName := discoverHostInfoAppName(ctx, time.Second, 5*time.Second)
+		cancel()
+		if appName != "" {
+			cfg.AppName = appName
+			pkglog.Infof("APP_NAME resolved from hostinfo API: %s", appName)
+		} else {
+			pkglog.Warnf("hostinfo APP_NAME discovery timed out — using fallback: %s", cfg.AppName)
+		}
 	}
 
 	// Validate passwords for SQL safety (mirrors entrypoint.sh)
@@ -220,10 +231,47 @@ func pickFirstNonLoopbackIP() string {
 	return ""
 }
 
-// tryGetHostInfoAppName queries the Flux node hostinfo API for the running app name.
-func tryGetHostInfoAppName() string {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+// discoverHostInfoAppName retries the Flux node hostinfo API until it returns
+// an app name or the overall startup deadline expires.
+var hostInfoAppNameProbe = tryGetHostInfoAppName
+
+func discoverHostInfoAppName(ctx context.Context, initialDelay, maxDelay time.Duration) string {
+	if initialDelay <= 0 {
+		initialDelay = time.Second
+	}
+	if maxDelay < initialDelay {
+		maxDelay = initialDelay
+	}
+	delay := initialDelay
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		appName := hostInfoAppNameProbe(probeCtx)
+		cancel()
+		if appName != "" {
+			return appName
+		}
+
+		pkglog.Infof("Flux hostinfo APP_NAME unavailable; retrying in %s", delay)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ""
+		case <-timer.C:
+		}
+		if delay < maxDelay {
+			delay += time.Second
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+	}
+}
+
+// tryGetHostInfoAppName performs one Flux node hostinfo request.
+func tryGetHostInfoAppName(ctx context.Context) string {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://fluxnode.service:16101/hostinfo", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -294,6 +342,10 @@ func buildEtcdConfig(cfg *config.Config) {
 	sort.Strings(ips)
 	cfg.ClusterIPs = ips
 
+	cfg.EtcdHosts, cfg.PatroniEtcdHosts, cfg.EtcdInitialCluster = buildEtcdTopology(cfg, ips)
+}
+
+func buildEtcdTopology(cfg *config.Config, ips []string) (string, string, string) {
 	var hostsParts, initialParts []string
 	for _, ip := range ips {
 		name := nodeNameFromIP(ip)
@@ -302,8 +354,8 @@ func buildEtcdConfig(cfg *config.Config) {
 		hostsParts = append(hostsParts, clientURL)
 		initialParts = append(initialParts, name+"="+peerURL)
 	}
-	cfg.EtcdHosts = strings.Join(hostsParts, ",")
-	cfg.EtcdInitialCluster = strings.Join(initialParts, ",")
+	patroniHosts := fmt.Sprintf("127.0.0.1:%d", cfg.EtcdClientPort)
+	return strings.Join(hostsParts, ","), patroniHosts, strings.Join(initialParts, ",")
 }
 
 func runCertsScript(script string, cfg *config.Config) error {
@@ -379,7 +431,7 @@ func renderPatroniConfig(in, out string, cfg *config.Config, pgBinDir string) er
 	replacements := map[string]string{
 		"__MY_NAME__":                       cfg.MyName,
 		"__MY_IP__":                         cfg.MyIP,
-		"__ETCD_HOSTS__":                    cfg.EtcdHosts,
+		"__PATRONI_ETCD_HOSTS__":            cfg.PatroniEtcdHosts,
 		"__ETCD_PROTOCOL__":                 cfg.EtcdProtocol(),
 		"__HOST_POSTGRES_PORT__":            strconv.Itoa(cfg.HostPostgresPort),
 		"__HOST_PATRONI_API_PORT__":         strconv.Itoa(cfg.HostPatroniAPIPort),

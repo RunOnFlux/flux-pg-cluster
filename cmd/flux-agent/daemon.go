@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -108,7 +109,8 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 
 	if endpoint == "" {
 		pkglog.Warnf("etcd not reachable on local or external endpoint")
-		handleEtcdUnreachable(cfg, sslOpts, desiredIPs, unavailFile)
+		handleEtcdUnreachable(cfg, sslOpts, desiredIPs, stable, unavailFile,
+			fnfFlagFile, fnfCooldownFile, noQuorumFile, fnfCooldownSecs)
 		return
 	}
 	pkglog.Infof("using etcd endpoint: %s", endpoint)
@@ -132,12 +134,23 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 		pkglog.Infof("no-quorum count: %d/%d", noQuorumCount, cfg.DesiredStateStabilityCycles)
 	} else {
 		_ = os.WriteFile(noQuorumFile, []byte("0"), 0o644)
+		reconcilePatroniDCSConfig(cfg, ec)
+		reconcilePostgresCredentials(cfg)
 	}
 
-	// 4. Force-new-cluster check
+	// 4. Force-new-cluster check. Never choose a survivor merely because it has
+	// PGDATA: during an ordinary quorum loss every replica has PGDATA. Automatic
+	// recovery requires authenticated agreement that exactly one expected node
+	// has data and every other node is empty.
 	if !hasQuorum && noQuorumCount >= cfg.DesiredStateStabilityCycles && stable && dirExists("/var/lib/postgresql/data/global") {
-		if shouldFNFNow(fnfCooldownFile, fnfCooldownSecs) {
-			triggerForceNewCluster(cfg, ec, fnfFlagFile, fnfCooldownFile, noQuorumFile)
+		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
+		if !safe {
+			pkglog.Errorf("AUTOMATIC QUORUM RECOVERY BLOCKED: %s", reason)
+		} else if authority.IP != cfg.MyIP {
+			pkglog.Errorf("AUTOMATIC QUORUM RECOVERY BLOCKED: sole authority is %s, not this node", authority.NodeName)
+		} else if shouldFNFNow(fnfCooldownFile, fnfCooldownSecs) {
+			pkglog.Warnf("automatic recovery authorized: %s", reason)
+			triggerForceNewCluster(cfg, sslOpts, authority.SystemID, fnfFlagFile, fnfCooldownFile, noQuorumFile)
 			return
 		}
 	}
@@ -389,13 +402,16 @@ func shouldFNFNow(cooldownFile string, cooldownSecs int) bool {
 	return true
 }
 
-func triggerForceNewCluster(cfg *config.Config, ec *etcdmgr.Client, flagFile, cooldownFile, noQuorumFile string) {
+func triggerForceNewCluster(cfg *config.Config, sslOpts []string, systemID, flagFile, cooldownFile, noQuorumFile string) {
 	pkglog.Section("QUORUM RECOVERY: TRIGGERING FORCE-NEW-CLUSTER")
 	_ = os.WriteFile(flagFile, []byte("1"), 0o644)
 	_ = os.WriteFile(cooldownFile, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644)
 	_ = os.WriteFile(noQuorumFile, []byte("0"), 0o644)
 	supervisorctl("restart", "etcd")
+	localEndpoint := fmt.Sprintf("%s://127.0.0.1:%d", cfg.EtcdProtocol(), cfg.EtcdClientPort)
+	ec := etcdmgr.New(localEndpoint, sslOpts)
 	// Wait for etcd to come up
+	etcdReady := false
 	for i := 0; i < 30; i++ {
 		time.Sleep(2 * time.Second)
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -403,18 +419,178 @@ func triggerForceNewCluster(cfg *config.Config, ec *etcdmgr.Client, flagFile, co
 		cancel()
 		if err == nil {
 			pkglog.Infof("etcd is up after force-new-cluster restart")
+			etcdReady = true
 			break
 		}
 	}
-	// Wipe stale Patroni DCS keys so the leader can be re-acquired immediately
-	pkglog.Infof("wiping stale Patroni DCS keys")
+	if !etcdReady {
+		pkglog.Errorf("force-new-cluster restart did not become ready; preserving Patroni DCS keys for the next recovery attempt")
+		return
+	}
+	// Preserve durable dynamic configuration but remove all ephemeral Patroni
+	// election/health state from the dead epoch.
+	prefix := fmt.Sprintf("/patroni/%s", cfg.PatroniScope)
+	pkglog.Infof("wiping stale Patroni DCS election state")
+	for _, key := range []string{"leader", "status", "failsafe", "failover", "sync"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = ec.RM(ctx, prefix+"/"+key)
+		cancel()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = ec.RM(ctx, fmt.Sprintf("/patroni/%s/leader", cfg.PatroniScope))
+	_ = ec.RMRecursive(ctx, prefix+"/members")
 	cancel()
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = ec.RMRecursive(ctx2, fmt.Sprintf("/patroni/%s/members", cfg.PatroniScope))
-	cancel2()
+	if systemID != "" {
+		ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		if err := ec.Set(ctx, prefix+"/initialize", systemID); err != nil {
+			pkglog.Errorf("failed to set recovered PostgreSQL system ID in DCS: %v", err)
+		}
+		cancel()
+	}
 	pkglog.Infof("quorum recovery complete — new nodes can now join")
+}
+
+var requiredPatroniHBA = []string{
+	"hostssl replication replicator 0.0.0.0/0 cert clientcert=verify-full",
+	"hostssl all all 0.0.0.0/0 md5",
+	"host replication replicator 0.0.0.0/0 md5",
+	"host all all 0.0.0.0/0 md5",
+}
+
+// mergePatroniRecoveryConfig repairs settings that are otherwise applied only
+// by Patroni's first bootstrap. A physical restore preserves PGDATA but may be
+// paired with an older or incomplete DCS snapshot, so these invariants must be
+// continuously reconciled.
+func mergePatroniRecoveryConfig(raw string, cfg *config.Config) (string, bool, error) {
+	root := map[string]interface{}{}
+	if strings.TrimSpace(raw) != "" {
+		if err := json.Unmarshal([]byte(raw), &root); err != nil {
+			return "", false, fmt.Errorf("decode Patroni DCS config: %w", err)
+		}
+	}
+	before, err := json.Marshal(root)
+	if err != nil {
+		return "", false, fmt.Errorf("encode original Patroni DCS config: %w", err)
+	}
+
+	setDefault := func(key string, value interface{}) {
+		if _, ok := root[key]; !ok {
+			root[key] = value
+		}
+	}
+	setDefault("ttl", cfg.PatroniTTL)
+	setDefault("loop_wait", cfg.PatroniLoopWait)
+	setDefault("retry_timeout", cfg.PatroniRetryTimeout)
+	setDefault("maximum_lag_on_failover", cfg.PatroniMaxLag)
+
+	postgresql, ok := root["postgresql"].(map[string]interface{})
+	if !ok {
+		postgresql = map[string]interface{}{}
+		root["postgresql"] = postgresql
+	}
+	postgresql["use_pg_rewind"] = true
+	existingHBA := make([]string, 0)
+	switch values := postgresql["pg_hba"].(type) {
+	case []interface{}:
+		for _, value := range values {
+			if rule, ok := value.(string); ok {
+				existingHBA = append(existingHBA, rule)
+			}
+		}
+	case []string:
+		existingHBA = append(existingHBA, values...)
+	}
+	for _, required := range requiredPatroniHBA {
+		if !containsString(existingHBA, required) {
+			existingHBA = append(existingHBA, required)
+		}
+	}
+	postgresql["pg_hba"] = existingHBA
+
+	encoded, err := json.Marshal(root)
+	if err != nil {
+		return "", false, fmt.Errorf("encode Patroni DCS config: %w", err)
+	}
+	if string(before) == string(encoded) {
+		return raw, false, nil
+	}
+	return string(encoded), true, nil
+}
+
+func reconcilePatroniDCSConfig(cfg *config.Config, ec *etcdmgr.Client) {
+	key := fmt.Sprintf("/patroni/%s/config", cfg.PatroniScope)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	raw, err := ec.Get(ctx, key)
+	cancel()
+	if err != nil {
+		pkglog.Warnf("read Patroni DCS config for recovery reconciliation: %v", err)
+		return
+	}
+	merged, changed, err := mergePatroniRecoveryConfig(raw, cfg)
+	if err != nil {
+		pkglog.Errorf("Patroni DCS recovery reconciliation blocked: %v", err)
+		return
+	}
+	if !changed {
+		return
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	err = ec.Set(ctx, key, merged)
+	cancel()
+	if err != nil {
+		pkglog.Warnf("write reconciled Patroni DCS config: %v", err)
+		return
+	}
+	pkglog.Infof("reconciled Patroni DCS pg_hba and pg_rewind settings")
+}
+
+const postgresCredentialsMarker = "/tmp/postgres-credentials-reconciled"
+
+func sqlLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func postgresCredentialSQL(cfg *config.Config) string {
+	return fmt.Sprintf(`
+DO $do$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'replicator') THEN
+    CREATE ROLE replicator WITH LOGIN REPLICATION;
+  END IF;
+END
+$do$;
+ALTER ROLE replicator WITH LOGIN REPLICATION PASSWORD %s;
+ALTER ROLE postgres WITH LOGIN SUPERUSER REPLICATION PASSWORD %s;
+`, sqlLiteral(cfg.PostgresReplicationPassword), sqlLiteral(cfg.PostgresSuperuserPassword))
+}
+
+func localPSQL(port int, sql string) ([]byte, error) {
+	cmd := exec.Command("su", "-s", "/bin/bash", "postgres", "-c",
+		fmt.Sprintf("exec psql -X -h /var/run/postgresql -p %d -d postgres -v ON_ERROR_STOP=1 -At", port))
+	cmd.Stdin = strings.NewReader(sql)
+	return cmd.CombinedOutput()
+}
+
+// reconcilePostgresCredentials runs once per container lifetime, and only on
+// the writable primary. Roles are database state and therefore come from the
+// backup; environment secrets are deployment state. Re-applying them after a
+// restore lets replicas clone without operator SQL.
+func reconcilePostgresCredentials(cfg *config.Config) {
+	if fileExists(postgresCredentialsMarker) || !dirExists("/var/lib/postgresql/data/global") {
+		return
+	}
+	out, err := localPSQL(cfg.PostgresPort, "SELECT CASE WHEN pg_is_in_recovery() THEN 'replica' ELSE 'primary' END;\n")
+	if err != nil || strings.TrimSpace(string(out)) != "primary" {
+		return
+	}
+	out, err = localPSQL(cfg.PostgresPort, postgresCredentialSQL(cfg))
+	if err != nil {
+		pkglog.Errorf("failed to reconcile PostgreSQL cluster roles after restore: %v (output=%s)", err, strings.TrimSpace(string(out)))
+		return
+	}
+	if err := os.WriteFile(postgresCredentialsMarker, []byte("ok\n"), 0o600); err != nil {
+		pkglog.Warnf("write PostgreSQL credential reconciliation marker: %v", err)
+	}
+	pkglog.Infof("reconciled postgres and replicator roles from configured credentials")
 }
 
 // isPeerReachable returns true if the etcd client endpoint on ip responds within 3 seconds.
@@ -648,7 +824,8 @@ func membersIPs(members []etcdmgr.Member, clientPort int) []string {
 	return out
 }
 
-func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, unavailFile string) {
+func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, desiredStable bool,
+	unavailFile, fnfFlagFile, fnfCooldownFile, noQuorumFile string, fnfCooldownSecs int) {
 	count := 0
 	if data, err := os.ReadFile(unavailFile); err == nil {
 		count, _ = strconv.Atoi(strings.TrimSpace(string(data)))
@@ -679,6 +856,40 @@ func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, una
 		}
 	}
 	pkglog.Infof("peer evidence while etcd unavailable: reachable=%d know_us=%d dont_know_us=%d", reachable, knowUs, dontKnowUs)
+
+	// A restored cluster commonly has no working etcd endpoint at all. Recover
+	// only after the Flux membership is stable and every authenticated identity
+	// endpoint proves that exactly one node owns PGDATA. This blocks force-new
+	// during partitions and ordinary multi-replica quorum loss.
+	if count >= cfg.EtcdUnavailableRecoveryCycles && desiredStable && cfg.DeadClusterRecovery && reachable == 0 {
+		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
+		if !safe {
+			pkglog.Errorf("AUTOMATIC DEAD-CLUSTER RECOVERY BLOCKED: %s", reason)
+		} else if authority.IP == cfg.MyIP {
+			if shouldFNFNow(fnfCooldownFile, fnfCooldownSecs) {
+				pkglog.Warnf("automatic dead-cluster recovery authorized: %s", reason)
+				triggerForceNewCluster(cfg, sslOpts, authority.SystemID,
+					fnfFlagFile, fnfCooldownFile, noQuorumFile)
+			}
+			return
+		} else if directoryIsEmpty("/var/lib/postgresql/data") {
+			// This node is an explicitly empty follower. Drop only its local etcd
+			// state so etcd-start can register it as a learner with the authority.
+			if !etcdRestartCooldownExpired() {
+				pkglog.Infof("waiting for recent etcd restart to settle before joining authority %s", authority.NodeName)
+				return
+			}
+			pkglog.Warnf("sole PostgreSQL authority is %s — resetting local etcd to join it as a learner", authority.NodeName)
+			if err := wipeDir("/var/lib/etcd"); err != nil {
+				pkglog.Errorf("failed to reset local etcd follower state: %v", err)
+				return
+			}
+			markEtcdRestart()
+			supervisorctl("restart", "etcd")
+			_ = os.WriteFile(unavailFile, []byte("0"), 0o644)
+			return
+		}
+	}
 
 	if count >= cfg.EtcdUnavailableRecoveryCycles && reachable > 0 {
 		if dontKnowUs > knowUs {
@@ -729,25 +940,19 @@ func markEtcdRestart() {
 // updateClusterEnv keeps /etc/cluster_env and patroni.yml in sync with the
 // desired IPs so a Patroni restart picks up the right hosts.
 func updateClusterEnv(cfg *config.Config, desiredIPs []string) {
-	var hostsParts, initialParts []string
-	for _, ip := range desiredIPs {
-		name := "node-" + strings.ReplaceAll(ip, ".", "-")
-		hostsParts = append(hostsParts, fmt.Sprintf("%s:%d", ip, cfg.HostEtcdClientPort))
-		initialParts = append(initialParts, name+"="+fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdPeerPort))
-	}
-	newHosts := strings.Join(hostsParts, ",")
-	newInitial := strings.Join(initialParts, ",")
+	newHosts, newPatroniHosts, newInitial := buildEtcdTopology(cfg, desiredIPs)
 
-	if newInitial == cfg.EtcdInitialCluster && newHosts == cfg.EtcdHosts {
+	if newInitial == cfg.EtcdInitialCluster && newHosts == cfg.EtcdHosts && newPatroniHosts == cfg.PatroniEtcdHosts {
 		return
 	}
 	cfg.EtcdHosts = newHosts
+	cfg.PatroniEtcdHosts = newPatroniHosts
 	cfg.EtcdInitialCluster = newInitial
 	if err := cfg.WriteClusterEnv(); err != nil {
 		pkglog.Warnf("write cluster env: %v", err)
 	}
 	// Update patroni.yml etcd hosts line
-	updatePatroniYAMLHosts("/etc/patroni/patroni.yml", newHosts)
+	updatePatroniYAMLHosts("/etc/patroni/patroni.yml", newPatroniHosts)
 }
 
 func updatePatroniYAMLHosts(path, hosts string) {
