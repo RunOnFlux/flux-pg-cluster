@@ -2,12 +2,52 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/RunOnFlux/flux-pg-cluster/internal/config"
 )
+
+func TestJoinDiscoveryReloadsTopologyOnEveryAttempt(t *testing.T) {
+	cfg := recoveryTestConfig()
+	cfg.EtcdInitialCluster = "node-82-67-53-6=https://82.67.53.6:12380"
+	cfg.EtcdJoinRetryDelaySeconds = 0
+
+	loads := 0
+	_, _, err := tryJoinExistingWithLoader(cfg, nil, nil, false, 3, func(cfg *config.Config) error {
+		loads++
+		// Keep this as a self-only view so the test performs no network I/O. The
+		// important regression is that an initially empty peer list no longer
+		// returns before loading, and that all retry attempts refresh the input.
+		cfg.EtcdInitialCluster = "node-82-67-53-6=https://82.67.53.6:12380"
+		return nil
+	})
+	if err == nil {
+		t.Fatal("empty peer topology should still report no reachable peers")
+	}
+	if loads != 3 {
+		t.Fatalf("cluster_env reloads = %d, want one for each of 3 attempts", loads)
+	}
+}
+
+func TestJoinDiscoveryRetriesWhenReloadFailsWithNoTopology(t *testing.T) {
+	cfg := recoveryTestConfig()
+	cfg.EtcdJoinRetryDelaySeconds = 0
+
+	loads := 0
+	_, _, err := tryJoinExistingWithLoader(cfg, nil, nil, false, 2, func(*config.Config) error {
+		loads++
+		return errors.New("temporary read failure")
+	})
+	if err == nil {
+		t.Fatal("unreachable fallback peers should report no reachable peers")
+	}
+	if loads != 2 {
+		t.Fatalf("cluster_env reloads = %d, want 2", loads)
+	}
+}
 
 func TestBootstrapRetryDelayOutlivesSupervisorStartupWindow(t *testing.T) {
 	if got := bootstrapRetryDelay(0); got != 2*time.Second {
