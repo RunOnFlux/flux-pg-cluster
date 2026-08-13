@@ -54,7 +54,7 @@ func localNodeIdentity(cfg *config.Config) nodeIdentity {
 		PatroniScope:   cfg.PatroniScope,
 		NodeName:       cfg.MyName,
 		PGDataEmpty:    directoryIsEmpty("/var/lib/postgresql/data"),
-		EtcdDataEmpty:  directoryIsEmpty("/var/lib/etcd"),
+		EtcdDataEmpty:  etcdDataDirectoryIsFresh("/var/lib/etcd"),
 		MembershipView: membershipNames(cfg.EtcdInitialCluster),
 	}
 	if !identity.PGDataEmpty {
@@ -86,6 +86,27 @@ func directoryIsEmpty(path string) bool {
 		return true
 	}
 	return err == nil && len(entries) == 0
+}
+
+// etcdDataDirectoryIsFresh applies the same strict empty-directory policy as
+// directoryIsEmpty, except for the agent-owned .etcd3_api breadcrumb. The
+// marker is written before execing etcd and is not etcd state; treating it as
+// preserved state prevents an otherwise fresh node from ever retrying a safe
+// bootstrap after an unsuccessful etcd launch.
+func etcdDataDirectoryIsFresh(path string) bool {
+	entries, err := os.ReadDir(path)
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Name() != ".etcd3_api" || !entry.Type().IsRegular() {
+			return false
+		}
+	}
+	return true
 }
 
 // identityProbeToken authenticates the read-only peer probe without exposing

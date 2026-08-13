@@ -153,6 +153,34 @@ func TestDirectoryIsEmptyIsStrict(t *testing.T) {
 	}
 }
 
+func TestEtcdDataDirectoryIsFreshAllowsOnlyAgentMarker(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, ".etcd3_api")
+	if err := os.WriteFile(marker, []byte("etcd3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !etcdDataDirectoryIsFresh(dir) {
+		t.Fatal("the agent-owned marker must not count as persisted etcd state")
+	}
+
+	if err := os.Mkdir(filepath.Join(dir, "member"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if etcdDataDirectoryIsFresh(dir) {
+		t.Fatal("any etcd state alongside the marker must block fresh bootstrap")
+	}
+}
+
+func TestEtcdDataDirectoryIsFreshRejectsMarkerDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".etcd3_api"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if etcdDataDirectoryIsFresh(dir) {
+		t.Fatal("only the regular marker file may be ignored")
+	}
+}
+
 func TestIdentityEndpointRequiresSharedProbeToken(t *testing.T) {
 	cfg := bootstrapTestConfig()
 
@@ -176,5 +204,45 @@ func TestIdentityEndpointRequiresSharedProbeToken(t *testing.T) {
 	}
 	if identity.AppName != cfg.AppName || identity.NodeName != cfg.MyName {
 		t.Fatalf("identity = %+v, want app=%q node=%q", identity, cfg.AppName, cfg.MyName)
+	}
+}
+
+func TestIdentityEndpointReloadsCurrentCredentialsAndMembership(t *testing.T) {
+	startup := bootstrapTestConfig()
+	startup.PostgresReplicationPassword = "stale-secret"
+	startup.EtcdInitialCluster = "node-10-0-0-1=https://10.0.0.1:12380"
+
+	current := *startup
+	current.PostgresReplicationPassword = "current-secret"
+	current.EtcdInitialCluster = "node-10-0-0-1=https://10.0.0.1:12380," +
+		"node-10-0-0-2=https://10.0.0.2:12380," +
+		"node-10-0-0-3=https://10.0.0.3:12380"
+
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, clusterIdentityPath, nil)
+	req.Header.Set("X-Flux-Cluster-Probe", identityProbeToken(&current))
+	loads := 0
+	writeCurrentIdentityResponse(recorder, startup, req, func(cfg *config.Config) error {
+		loads++
+		*cfg = current
+		return nil
+	})
+
+	if loads != 1 {
+		t.Fatalf("cluster_env reloads = %d, want 1", loads)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("identity status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var identity nodeIdentity
+	if err := json.Unmarshal(recorder.Body.Bytes(), &identity); err != nil {
+		t.Fatal(err)
+	}
+	wantView := membershipNames(current.EtcdInitialCluster)
+	if !reflect.DeepEqual(identity.MembershipView, wantView) {
+		t.Fatalf("membership view = %v, want %v", identity.MembershipView, wantView)
+	}
+	if startup.PostgresReplicationPassword != "stale-secret" {
+		t.Fatal("identity reload mutated the proxy's shared startup config")
 	}
 }

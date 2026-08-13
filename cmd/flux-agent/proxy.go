@@ -257,7 +257,7 @@ func handleProxyConn(client net.Conn, primaryIP string, cfg *config.Config, host
 			return
 		}
 		defer req.Body.Close()
-		writeIdentityResponse(&connResponseWriter{Conn: client}, cfg, req)
+		writeCurrentIdentityResponse(&connResponseWriter{Conn: client}, cfg, req, config.LoadClusterEnv)
 		return
 	}
 	if primaryIP == "" {
@@ -282,6 +282,19 @@ func handleProxyConn(client net.Conn, primaryIP string, cfg *config.Config, host
 	go func() { _, _ = io.Copy(upstream, reader); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(client, upstream); done <- struct{}{} }()
 	<-done
+}
+
+// writeCurrentIdentityResponse reloads the configuration snapshot used for
+// authentication and membership reporting. The daemon can update cluster_env
+// without restarting the proxy, so serving the startup snapshot here can make
+// otherwise matching peers reject each other's probe tokens or topology.
+func writeCurrentIdentityResponse(w http.ResponseWriter, cfg *config.Config, r *http.Request,
+	loadClusterEnv func(*config.Config) error) {
+	current := *cfg
+	if err := loadClusterEnv(&current); err != nil {
+		pkglog.Warnf("proxy: could not refresh %s for identity probe: %v", config.ClusterEnvFile, err)
+	}
+	writeIdentityResponse(w, &current, r)
 }
 
 // connResponseWriter is the minimal http.ResponseWriter needed to serve the

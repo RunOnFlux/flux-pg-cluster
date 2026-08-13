@@ -334,19 +334,29 @@ func verifyLocalDataWithTempEtcd(cfg *config.Config, dataDir, token string, sslO
 // ETCD_INITIAL_CLUSTER string derived from actual registered members (needed
 // to satisfy etcd v3.3's "member count is unequal" check).
 func tryJoinExisting(cfg *config.Config, sslOpts, otherIPs []string, forceRejoin bool, maxRetries int) (string, string, error) {
-	delay := time.Duration(cfg.EtcdJoinRetryDelaySeconds) * time.Second
+	return tryJoinExistingWithLoader(cfg, sslOpts, otherIPs, forceRejoin, maxRetries, config.LoadClusterEnv)
+}
+
+func tryJoinExistingWithLoader(cfg *config.Config, sslOpts, otherIPs []string, forceRejoin bool, maxRetries int,
+	loadClusterEnv func(*config.Config) error) (string, string, error) {
 	if maxRetries < 1 {
 		maxRetries = 1
 	}
 
 	anyReachable := false
-	peerURL := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), cfg.MyIP, cfg.HostEtcdPeerPort)
-
-	if len(otherIPs) == 0 {
-		return "", "", myerrors.NewNoPeersReachable()
-	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// The reconciliation daemon may replace an incomplete startup topology
+		// while this process is waiting for Flux placement to settle. Refresh the
+		// inputs, not only the network operation, on every attempt. Keep the last
+		// usable snapshot if a concurrent read temporarily fails.
+		if err := loadClusterEnv(cfg); err != nil {
+			pkglog.Warnf("cannot refresh %s for peer discovery: %v", config.ClusterEnvFile, err)
+		} else {
+			otherIPs = otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName)
+		}
+		delay := time.Duration(cfg.EtcdJoinRetryDelaySeconds) * time.Second
+		peerURL := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), cfg.MyIP, cfg.HostEtcdPeerPort)
 		pkglog.Infof("peer discovery attempt %d/%d", attempt, maxRetries)
 		for _, ip := range otherIPs {
 			endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
@@ -451,7 +461,7 @@ func decideBootstrap(cfg *config.Config, dataDir string) string {
 	expectedCount := len(strings.Split(cfg.EtcdInitialCluster, ","))
 	etcdDataEmpty := !fileExists(dataDir + "/member/snap/db")
 	pgDataEmpty := !dirExists("/var/lib/postgresql/data/global")
-	strictlyEmpty := directoryIsEmpty(dataDir) && directoryIsEmpty("/var/lib/postgresql/data")
+	strictlyEmpty := etcdDataDirectoryIsFresh(dataDir) && directoryIsEmpty("/var/lib/postgresql/data")
 
 	candidate := bootstrapCandidate(cfg.EtcdInitialCluster)
 
