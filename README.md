@@ -67,6 +67,11 @@ Key Points:
   - Use the official Docker image: `runonflux/flux-pg-cluster:latest` (PostgreSQL 14).
   - For PostgreSQL 15, use `runonflux/flux-pg-cluster:pg15` with **fresh volumes** on all nodes.
   - Add persistent Container Data for PostgreSQL at `/var/lib/postgresql/data`.
+  - Add persistent Container Data for etcd at `/var/lib/etcd`. Without this,
+    a simultaneous replacement or restart of all instances loses the complete
+    Patroni DCS. The agent can recover automatically when the surviving PGDATA
+    copies unanimously identify one durable former primary, but persisting etcd
+    avoids the recovery event and remains strongly recommended.
   - **If you enable the built-in backups, add a separate persistent Container Data volume at `/var/lib/postgresql/backups`.** This is a sibling of the PostgreSQL data directory, so persisting `/var/lib/postgresql/data` does not persist backups. Without this volume, backups disappear when Flux replaces or reschedules the container. The image initializes the mounted directory with ownership for the `postgres` user at startup.
   - Add these ports to the `Cont. Ports` field: `[5432,5433,8008,2379,2380]`.
   - Using the `Ports` field, map those ports to new ones, for example: `[15432,15433,18008,12379,12380]`.
@@ -136,7 +141,7 @@ Key Points:
 | `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Explicitly allow creating a brand-new etcd cluster when no peers are reachable, including an otherwise ambiguous single-node deployment. Keep `false` during normal operations; set `true` only for a deliberate first-time cluster creation, then unset it. | `false` |
 | `ALLOW_ANY_NODE_BOOTSTRAP` | If `true`, bypass deterministic bootstrap-candidate restriction. Keep `false` for safety. | `false` |
 | `AUTO_BOOTSTRAP_IF_FRESH` | If `true`, the deterministic candidate may create the first cluster only after **every expected peer is reachable** and repeatedly reports empty PostgreSQL and etcd state with the identical app, Patroni scope, and membership view. Unreachable is never treated as empty. Single-node automatic bootstrap is deliberately blocked as ambiguous; use `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` for an intentional single-node first boot. Requires `PROXY_ENABLED=true` on every peer. | `true` |
-| `DEAD_CLUSTER_RECOVERY` | If `true`, a restored node may rebuild the **etcd/Patroni control plane** only after every expected node repeatedly agrees that it is the **sole** node with valid PostgreSQL data. All other nodes must explicitly report empty PGDATA; an unreachable peer, conflicting membership view, unreadable system ID, or second data-bearing node blocks recovery. | `true` |
+| `DEAD_CLUSTER_RECOVERY` | If `true`, the agent may rebuild the **etcd/Patroni control plane** after every expected node repeatedly agrees on a safe PostgreSQL authority. A sole restored PGDATA copy is authoritative. After total DCS loss with multiple copies, every node must report empty etcd, all PostgreSQL system IDs must match, and exactly one copy must retain the durable primary role while the others identify as replicas. Unreachable peers, conflicting views, mismatched IDs, or multiple primaries block recovery. | `true` |
 | `ALLOW_PG_DATA_WIPE` | If `true`, the updater may delete `/var/lib/postgresql/data` when this node's PostgreSQL system ID differs from the cluster's authoritative system ID (so Patroni can re-clone via `pg_basebackup`). **Defaults to `false`**: instead of deleting data, the updater logs a loud, actionable error and leaves the data intact for a human to verify. When enabled, the wipe still requires the **live primary** to confirm the authoritative system ID. Only enable temporarily, on a node you have confirmed holds stale data. | `false` |
 | `ETCD_JOIN_MAX_RETRIES` | Peer-join attempts made by the deterministic candidate before evaluating bootstrap. Non-candidates wait at least 60 attempts and never bootstrap themselves. | `12` |
 | `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
@@ -187,7 +192,7 @@ The automatic recovery workflow is:
 3. Start/redeploy the other expected nodes with genuinely empty PostgreSQL data directories. Keep the same app name, Patroni scope, membership, ports, TLS passphrase, and PostgreSQL passwords on every node.
 4. Start all nodes. Their authenticated identity endpoints must be mutually reachable through the mapped proxy port.
 
-The nodes repeatedly exchange their app/scope, membership view, PGDATA state, and PostgreSQL system identifier. Recovery proceeds only when exactly one node has readable PostgreSQL data and every other expected node explicitly reports empty PGDATA. The authoritative node then:
+The nodes repeatedly exchange their app/scope, membership view, PGDATA and etcd state, PostgreSQL system identifier, and durable PostgreSQL role. Recovery proceeds when either exactly one node has readable PostgreSQL data, or total DCS loss is unanimous and matching PostgreSQL copies identify exactly one former primary. The authoritative node then:
 
 - rebuilds the single-member etcd control plane and records its restored PostgreSQL system identifier;
 - clears only stale Patroni election/health keys while preserving dynamic configuration;
