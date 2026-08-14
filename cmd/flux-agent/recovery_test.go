@@ -197,11 +197,105 @@ func TestRecoveryAuthorityBlocksAmbiguousDurableRole(t *testing.T) {
 	}
 }
 
+func TestRecoveryAuthoritySelectsMostAdvancedReplicaWhenPrimaryIsGone(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryReplicaIdentity(cfg, cfg.MyIP, "same-system-id", 7, "0/500")
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryReplicaIdentity(cfg, "192.0.2.10", "same-system-id", 7, "0/700")},
+		{IP: "192.0.2.12", Identity: recoveryReplicaIdentity(cfg, "192.0.2.12", "same-system-id", 7, "0/600")},
+	}
+	authority, ok, reason := evaluateRecoveryAuthority(cfg, local, results)
+	if !ok {
+		t.Fatalf("expected replica recovery authority: %s", reason)
+	}
+	if authority.IP != "192.0.2.10" {
+		t.Fatalf("authority IP = %s, want most advanced replica 192.0.2.10", authority.IP)
+	}
+}
+
+func TestRecoveryAuthorityUsesDeterministicNameForReplicaPositionTie(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryReplicaIdentity(cfg, cfg.MyIP, "same-system-id", 7, "0/700")
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryReplicaIdentity(cfg, "192.0.2.10", "same-system-id", 7, "0/700")},
+		{IP: "192.0.2.12", Identity: recoveryReplicaIdentity(cfg, "192.0.2.12", "same-system-id", 7, "0/700")},
+	}
+	authority, ok, reason := evaluateRecoveryAuthority(cfg, local, results)
+	if !ok {
+		t.Fatalf("expected deterministic tied replica authority: %s", reason)
+	}
+	if authority.NodeName != "node-192-0-2-10" {
+		t.Fatalf("authority = %s, want lexicographically smallest node name", authority.NodeName)
+	}
+}
+
+func TestRecoveryAuthorityBlocksDivergentReplicaTimelines(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryReplicaIdentity(cfg, cfg.MyIP, "same-system-id", 7, "0/700")
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryReplicaIdentity(cfg, "192.0.2.10", "same-system-id", 8, "0/900")},
+		{IP: "192.0.2.12", Identity: recoveryReplicaIdentity(cfg, "192.0.2.12", "same-system-id", 7, "0/800")},
+	}
+	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
+		t.Fatal("replicas on divergent timelines must block automatic recovery")
+	}
+}
+
+func TestRecoveryAuthorityBlocksReplicaWithoutWALPosition(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryReplicaIdentity(cfg, cfg.MyIP, "same-system-id", 7, "0/700")
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryReplicaIdentity(cfg, "192.0.2.10", "same-system-id", 7, "")},
+		{IP: "192.0.2.12", Identity: recoveryReplicaIdentity(cfg, "192.0.2.12", "same-system-id", 7, "0/800")},
+	}
+	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
+		t.Fatal("a replica without durable WAL progress must block automatic recovery")
+	}
+}
+
 func recoveryDataIdentity(cfg *config.Config, ip, systemID, role string, etcdEmpty bool) nodeIdentity {
 	identity := recoveryIdentity(cfg, ip, false, systemID)
 	identity.PostgresDurableRole = role
 	identity.EtcdDataEmpty = etcdEmpty
 	return identity
+}
+
+func recoveryReplicaIdentity(cfg *config.Config, ip, systemID string, timeline uint64, lsn string) nodeIdentity {
+	identity := recoveryDataIdentity(cfg, ip, systemID, "replica", true)
+	identity.PostgresTimeline = timeline
+	identity.PostgresWALPosition = lsn
+	return identity
+}
+
+func TestPostgresControlDataSelectsGreatestDurablePosition(t *testing.T) {
+	control := parsePostgresControlData(`
+Database system identifier:           7673588256370979449
+Database cluster state:               shut down in recovery
+Latest checkpoint location:           0/500
+Latest checkpoint's TimeLineID:       7
+Minimum recovery ending location:     0/900
+Min recovery ending loc's timeline:   7
+`)
+	if control.SystemID != "7673588256370979449" || control.State != "shut down in recovery" {
+		t.Fatalf("unexpected control data: %#v", control)
+	}
+	position, err := control.recoveryPosition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if position.Timeline != 7 || formatPostgresLSN(position.LSN) != "0/900" {
+		t.Fatalf("recovery position = %#v, want timeline 7 LSN 0/900", position)
+	}
+}
+
+func TestPostgresLSNRoundTrip(t *testing.T) {
+	parsed, err := parsePostgresLSN("16/B374D848")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := formatPostgresLSN(parsed); got != "16/B374D848" {
+		t.Fatalf("formatted LSN = %s", got)
+	}
 }
 
 func TestRecoveryAuthorityBlocksUnreachableOrInconsistentPeer(t *testing.T) {
