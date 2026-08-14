@@ -12,7 +12,7 @@ import (
 
 func TestJoinDiscoveryReloadsTopologyOnEveryAttempt(t *testing.T) {
 	cfg := recoveryTestConfig()
-	cfg.EtcdInitialCluster = "node-82-67-53-6=https://82.67.53.6:12380"
+	cfg.EtcdInitialCluster = "node-192-0-2-11=https://192.0.2.11:12380"
 	cfg.EtcdJoinRetryDelaySeconds = 0
 
 	loads := 0
@@ -21,7 +21,7 @@ func TestJoinDiscoveryReloadsTopologyOnEveryAttempt(t *testing.T) {
 		// Keep this as a self-only view so the test performs no network I/O. The
 		// important regression is that an initially empty peer list no longer
 		// returns before loading, and that all retry attempts refresh the input.
-		cfg.EtcdInitialCluster = "node-82-67-53-6=https://82.67.53.6:12380"
+		cfg.EtcdInitialCluster = "node-192-0-2-11=https://192.0.2.11:12380"
 		return nil
 	})
 	if err == nil {
@@ -62,13 +62,13 @@ func recoveryTestConfig() *config.Config {
 	return &config.Config{
 		AppName:                     "postgres-cluster",
 		PatroniScope:                "postgres-cluster",
-		MyName:                      "node-82-67-53-6",
-		MyIP:                        "82.67.53.6",
+		MyName:                      "node-192-0-2-11",
+		MyIP:                        "192.0.2.11",
 		SSLEnabled:                  true,
 		HostEtcdClientPort:          12379,
 		HostEtcdPeerPort:            12380,
 		EtcdClientPort:              2379,
-		EtcdInitialCluster:          "node-78-117-242-56=https://78.117.242.56:12380,node-82-67-53-6=https://82.67.53.6:12380,node-90-70-74-189=https://90.70.74.189:12380",
+		EtcdInitialCluster:          "node-192-0-2-10=https://192.0.2.10:12380,node-192-0-2-11=https://192.0.2.11:12380,node-192-0-2-12=https://192.0.2.12:12380",
 		PatroniTTL:                  30,
 		PatroniLoopWait:             10,
 		PatroniRetryTimeout:         30,
@@ -94,15 +94,15 @@ func TestRecoveryAuthorityAllowsOnlySoleDataNode(t *testing.T) {
 	cfg := recoveryTestConfig()
 	local := recoveryIdentity(cfg, cfg.MyIP, true, "")
 	results := []peerIdentityResult{
-		{IP: "78.117.242.56", Identity: recoveryIdentity(cfg, "78.117.242.56", true, "")},
-		{IP: "90.70.74.189", Identity: recoveryIdentity(cfg, "90.70.74.189", false, "7658016226426196166")},
+		{IP: "192.0.2.10", Identity: recoveryIdentity(cfg, "192.0.2.10", true, "")},
+		{IP: "192.0.2.12", Identity: recoveryIdentity(cfg, "192.0.2.12", false, "7658016226426196166")},
 	}
 
 	authority, ok, reason := evaluateRecoveryAuthority(cfg, local, results)
 	if !ok {
 		t.Fatalf("expected safe recovery authority: %s", reason)
 	}
-	if authority.IP != "90.70.74.189" || authority.SystemID != "7658016226426196166" {
+	if authority.IP != "192.0.2.12" || authority.SystemID != "7658016226426196166" {
 		t.Fatalf("unexpected authority: %#v", authority)
 	}
 }
@@ -122,32 +122,101 @@ func TestNonCandidateCanOnlyEvaluateDataBearingRecovery(t *testing.T) {
 	}
 }
 
-func TestRecoveryAuthorityBlocksMultipleDataNodes(t *testing.T) {
+func TestRecoveryAuthorityAllowsUniqueDurablePrimaryAfterTotalDCSLoss(t *testing.T) {
 	cfg := recoveryTestConfig()
 	local := recoveryIdentity(cfg, cfg.MyIP, false, "same-system-id")
+	local.EtcdDataEmpty = true
+	local.PostgresDurableRole = "replica"
+	primary := recoveryIdentity(cfg, "192.0.2.10", false, "same-system-id")
+	primary.EtcdDataEmpty = true
+	primary.PostgresDurableRole = "primary"
+	replica := recoveryIdentity(cfg, "192.0.2.12", false, "same-system-id")
+	replica.EtcdDataEmpty = true
+	replica.PostgresDurableRole = "replica"
 	results := []peerIdentityResult{
-		{IP: "78.117.242.56", Identity: recoveryIdentity(cfg, "78.117.242.56", true, "")},
-		{IP: "90.70.74.189", Identity: recoveryIdentity(cfg, "90.70.74.189", false, "same-system-id")},
+		{IP: "192.0.2.10", Identity: primary},
+		{IP: "192.0.2.12", Identity: replica},
 	}
 
-	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
-		t.Fatal("multiple data-bearing nodes must block automatic force-new, even with matching system IDs")
+	authority, ok, reason := evaluateRecoveryAuthority(cfg, local, results)
+	if !ok {
+		t.Fatalf("expected safe total-DCS-loss recovery: %s", reason)
 	}
+	if authority.IP != "192.0.2.10" || authority.SystemID != "same-system-id" {
+		t.Fatalf("unexpected authority: %#v", authority)
+	}
+}
+
+func TestRecoveryAuthorityBlocksMultipleDurablePrimaries(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryIdentity(cfg, cfg.MyIP, false, "same-system-id")
+	local.EtcdDataEmpty = true
+	local.PostgresDurableRole = "primary"
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryDataIdentity(cfg, "192.0.2.10", "same-system-id", "primary", true)},
+		{IP: "192.0.2.12", Identity: recoveryDataIdentity(cfg, "192.0.2.12", "same-system-id", "replica", true)},
+	}
+	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
+		t.Fatal("multiple durable primary candidates must block automatic recovery")
+	}
+}
+
+func TestRecoveryAuthorityBlocksMismatchedSystemIDs(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryDataIdentity(cfg, cfg.MyIP, "system-a", "primary", true)
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryDataIdentity(cfg, "192.0.2.10", "system-a", "replica", true)},
+		{IP: "192.0.2.12", Identity: recoveryDataIdentity(cfg, "192.0.2.12", "system-b", "replica", true)},
+	}
+	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
+		t.Fatal("mismatched PostgreSQL system IDs must block automatic recovery")
+	}
+}
+
+func TestRecoveryAuthorityBlocksMultipleCopiesWithRetainedEtcd(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryDataIdentity(cfg, cfg.MyIP, "same-system-id", "primary", true)
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryDataIdentity(cfg, "192.0.2.10", "same-system-id", "replica", false)},
+		{IP: "192.0.2.12", Identity: recoveryDataIdentity(cfg, "192.0.2.12", "same-system-id", "replica", true)},
+	}
+	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
+		t.Fatal("retained etcd state must block multi-copy total-DCS-loss recovery")
+	}
+}
+
+func TestRecoveryAuthorityBlocksAmbiguousDurableRole(t *testing.T) {
+	cfg := recoveryTestConfig()
+	local := recoveryDataIdentity(cfg, cfg.MyIP, "same-system-id", "primary", true)
+	results := []peerIdentityResult{
+		{IP: "192.0.2.10", Identity: recoveryDataIdentity(cfg, "192.0.2.10", "same-system-id", "replica", true)},
+		{IP: "192.0.2.12", Identity: recoveryDataIdentity(cfg, "192.0.2.12", "same-system-id", "", true)},
+	}
+	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
+		t.Fatal("a missing durable role must block multi-copy recovery")
+	}
+}
+
+func recoveryDataIdentity(cfg *config.Config, ip, systemID, role string, etcdEmpty bool) nodeIdentity {
+	identity := recoveryIdentity(cfg, ip, false, systemID)
+	identity.PostgresDurableRole = role
+	identity.EtcdDataEmpty = etcdEmpty
+	return identity
 }
 
 func TestRecoveryAuthorityBlocksUnreachableOrInconsistentPeer(t *testing.T) {
 	cfg := recoveryTestConfig()
 	local := recoveryIdentity(cfg, cfg.MyIP, true, "")
 	results := []peerIdentityResult{
-		{IP: "78.117.242.56", Err: errTestUnreachable{}},
-		{IP: "90.70.74.189", Identity: recoveryIdentity(cfg, "90.70.74.189", false, "7658016226426196166")},
+		{IP: "192.0.2.10", Err: errTestUnreachable{}},
+		{IP: "192.0.2.12", Identity: recoveryIdentity(cfg, "192.0.2.12", false, "7658016226426196166")},
 	}
 	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
 		t.Fatal("an unreachable peer must block recovery")
 	}
 
-	results[0] = peerIdentityResult{IP: "78.117.242.56", Identity: recoveryIdentity(cfg, "78.117.242.56", true, "")}
-	results[0].Identity.MembershipView = []string{"node-78-117-242-56"}
+	results[0] = peerIdentityResult{IP: "192.0.2.10", Identity: recoveryIdentity(cfg, "192.0.2.10", true, "")}
+	results[0].Identity.MembershipView = []string{"node-192-0-2-10"}
 	if _, ok, _ := evaluateRecoveryAuthority(cfg, local, results); ok {
 		t.Fatal("a conflicting membership view must block recovery")
 	}
@@ -159,16 +228,16 @@ func (errTestUnreachable) Error() string { return "unreachable" }
 
 func TestEtcdTopologyUsesLoopbackOnlyForPatroniSelf(t *testing.T) {
 	cfg := recoveryTestConfig()
-	ips := []string{"78.117.242.56", "82.67.53.6", "90.70.74.189"}
+	ips := []string{"192.0.2.10", "192.0.2.11", "192.0.2.12"}
 	publicHosts, patroniHosts, initial := buildEtcdTopology(cfg, ips)
 
-	if publicHosts != "78.117.242.56:12379,82.67.53.6:12379,90.70.74.189:12379" {
+	if publicHosts != "192.0.2.10:12379,192.0.2.11:12379,192.0.2.12:12379" {
 		t.Fatalf("unexpected public hosts: %s", publicHosts)
 	}
 	if patroniHosts != "127.0.0.1:2379" {
 		t.Fatalf("unexpected Patroni hosts: %s", patroniHosts)
 	}
-	if !strings.Contains(initial, "node-82-67-53-6=https://82.67.53.6:12380") {
+	if !strings.Contains(initial, "node-192-0-2-11=https://192.0.2.11:12380") {
 		t.Fatalf("etcd peer advertisement must remain public: %s", initial)
 	}
 }

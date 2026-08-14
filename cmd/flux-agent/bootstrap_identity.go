@@ -32,6 +32,7 @@ type nodeIdentity struct {
 	NodeName                 string   `json:"node_name"`
 	PGDataEmpty              bool     `json:"pgdata_empty"`
 	PostgresSystemIdentifier string   `json:"postgres_system_id,omitempty"`
+	PostgresDurableRole      string   `json:"postgres_durable_role,omitempty"`
 	EtcdDataEmpty            bool     `json:"etcd_data_empty"`
 	MembershipView           []string `json:"membership_view"`
 }
@@ -61,8 +62,24 @@ func localNodeIdentity(cfg *config.Config) nodeIdentity {
 		if systemID, err := readLocalPGSystemID(); err == nil {
 			identity.PostgresSystemIdentifier = systemID
 		}
+		identity.PostgresDurableRole = postgresDurableRole("/var/lib/postgresql/data")
 	}
 	return identity
+}
+
+// postgresDurableRole reports the role encoded in PGDATA independently of
+// Patroni or etcd availability. Patroni-managed replicas retain standby.signal
+// (or recovery.signal during recovery), while the writable primary does not.
+// An unknown/partial data directory returns an empty role and can never be used
+// as positive recovery evidence.
+func postgresDurableRole(dataDir string) string {
+	if !dirExists(dataDir + "/global") {
+		return ""
+	}
+	if fileExists(dataDir+"/standby.signal") || fileExists(dataDir+"/recovery.signal") {
+		return "replica"
+	}
+	return "primary"
 }
 
 func membershipNames(initial string) []string {
@@ -236,10 +253,11 @@ func evaluateFreshPeerEvidence(cfg *config.Config, results []peerIdentityResult)
 }
 
 // evaluateRecoveryAuthority permits automatic dead-cluster recovery only when
-// every expected node provides authenticated, mutually consistent evidence and
-// exactly one node owns valid PostgreSQL data. It deliberately does not use
-// etcd state to select the authority: etcd is the control plane being rebuilt,
-// while PGDATA is the data that must be preserved.
+// every expected node provides authenticated, mutually consistent evidence.
+// A single PGDATA-bearing node remains authoritative for restore workflows. If
+// multiple copies exist after total DCS loss, they must share one system ID,
+// every etcd directory must be empty, and exactly one copy must carry the
+// durable primary role. Any ambiguity blocks creation of a new epoch.
 func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results []peerIdentityResult) (recoveryAuthority, bool, string) {
 	expectedPeers := len(otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName))
 	if len(results) != expectedPeers {
@@ -249,8 +267,8 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 	expectedView := membershipNames(cfg.EtcdInitialCluster)
 	all := []peerIdentityResult{{IP: cfg.MyIP, Identity: local}}
 	all = append(all, results...)
-	var authority recoveryAuthority
-	dataNodes := 0
+	var dataNodes []peerIdentityResult
+	allEtcdEmpty := true
 
 	for _, result := range all {
 		if result.Err != nil {
@@ -267,27 +285,72 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 		if !equalStrings(identity.MembershipView, expectedView) {
 			return recoveryAuthority{}, false, fmt.Sprintf("node %s has membership view %v, expected %v", result.IP, identity.MembershipView, expectedView)
 		}
+		if !identity.EtcdDataEmpty {
+			allEtcdEmpty = false
+		}
 		if identity.PGDataEmpty {
-			if identity.PostgresSystemIdentifier != "" {
-				return recoveryAuthority{}, false, fmt.Sprintf("node %s reports empty PGDATA with system ID %s", result.IP, identity.PostgresSystemIdentifier)
+			if identity.PostgresSystemIdentifier != "" || identity.PostgresDurableRole != "" {
+				return recoveryAuthority{}, false, fmt.Sprintf(
+					"node %s reports empty PGDATA with system ID %q and role %q",
+					result.IP, identity.PostgresSystemIdentifier, identity.PostgresDurableRole)
 			}
 			continue
 		}
 		if identity.PostgresSystemIdentifier == "" {
 			return recoveryAuthority{}, false, fmt.Sprintf("node %s has PostgreSQL data but its system ID is unreadable", result.IP)
 		}
-		dataNodes++
-		authority = recoveryAuthority{
-			IP:       result.IP,
-			NodeName: identity.NodeName,
-			SystemID: identity.PostgresSystemIdentifier,
-		}
+		dataNodes = append(dataNodes, result)
 	}
 
-	if dataNodes != 1 {
-		return recoveryAuthority{}, false, fmt.Sprintf("expected exactly one PostgreSQL data-bearing node, found %d", dataNodes)
+	if len(dataNodes) == 0 {
+		return recoveryAuthority{}, false, "no PostgreSQL data-bearing node found"
 	}
-	return authority, true, fmt.Sprintf("all expected nodes confirmed %s as the sole PostgreSQL authority", authority.NodeName)
+	if len(dataNodes) == 1 {
+		identity := dataNodes[0].Identity
+		authority := recoveryAuthority{IP: dataNodes[0].IP, NodeName: identity.NodeName, SystemID: identity.PostgresSystemIdentifier}
+		return authority, true, fmt.Sprintf("all expected nodes confirmed %s as the sole PostgreSQL authority", authority.NodeName)
+	}
+
+	if !allEtcdEmpty {
+		return recoveryAuthority{}, false, fmt.Sprintf(
+			"%d PostgreSQL copies exist but at least one node retains etcd state", len(dataNodes))
+	}
+
+	systemID := dataNodes[0].Identity.PostgresSystemIdentifier
+	var primary *peerIdentityResult
+	for i := range dataNodes {
+		node := &dataNodes[i]
+		identity := node.Identity
+		if identity.PostgresSystemIdentifier != systemID {
+			return recoveryAuthority{}, false, fmt.Sprintf(
+				"PostgreSQL system IDs disagree: node %s has %s, expected %s",
+				node.IP, identity.PostgresSystemIdentifier, systemID)
+		}
+		switch identity.PostgresDurableRole {
+		case "primary":
+			if primary != nil {
+				return recoveryAuthority{}, false, fmt.Sprintf(
+					"multiple durable primary candidates: %s and %s", primary.IP, node.IP)
+			}
+			primary = node
+		case "replica":
+			// Expected for every non-authoritative PGDATA copy.
+		default:
+			return recoveryAuthority{}, false, fmt.Sprintf(
+				"node %s has PostgreSQL data but durable role %q is ambiguous", node.IP, identity.PostgresDurableRole)
+		}
+	}
+	if primary == nil {
+		return recoveryAuthority{}, false, "multiple PostgreSQL copies exist but none has the durable primary role"
+	}
+	authority := recoveryAuthority{
+		IP:       primary.IP,
+		NodeName: primary.Identity.NodeName,
+		SystemID: systemID,
+	}
+	return authority, true, fmt.Sprintf(
+		"all expected nodes confirmed total DCS loss and %s as the unique durable PostgreSQL primary",
+		authority.NodeName)
 }
 
 func discoverRecoveryAuthority(cfg *config.Config) (recoveryAuthority, bool, string) {
@@ -333,7 +396,7 @@ func confirmRecoveryAuthorityWithPeers(cfg *config.Config) (recoveryAuthority, b
 		}
 	}
 	return confirmed, true, fmt.Sprintf(
-		"all expected nodes repeatedly confirmed %s as the sole PostgreSQL authority", confirmed.NodeName)
+		"all expected nodes repeatedly confirmed %s as the PostgreSQL recovery authority", confirmed.NodeName)
 }
 
 func equalStrings(a, b []string) bool {

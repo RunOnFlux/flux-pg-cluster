@@ -140,8 +140,8 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 
 	// 4. Force-new-cluster check. Never choose a survivor merely because it has
 	// PGDATA: during an ordinary quorum loss every replica has PGDATA. Automatic
-	// recovery requires authenticated agreement that exactly one expected node
-	// has data and every other node is empty.
+	// recovery requires authenticated agreement on either a sole data copy or,
+	// after total DCS loss, one durable primary among matching replicas.
 	if !hasQuorum && noQuorumCount >= cfg.DesiredStateStabilityCycles && stable && dirExists("/var/lib/postgresql/data/global") {
 		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
 		if !safe {
@@ -857,10 +857,10 @@ func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, des
 	}
 	pkglog.Infof("peer evidence while etcd unavailable: reachable=%d know_us=%d dont_know_us=%d", reachable, knowUs, dontKnowUs)
 
-	// A restored cluster commonly has no working etcd endpoint at all. Recover
-	// only after the Flux membership is stable and every authenticated identity
-	// endpoint proves that exactly one node owns PGDATA. This blocks force-new
-	// during partitions and ordinary multi-replica quorum loss.
+	// A restored cluster or total loss of ephemeral etcd commonly leaves no
+	// working endpoint. Recover only after the Flux membership is stable and
+	// every authenticated identity endpoint agrees on a safe authority. This
+	// blocks force-new during partitions and ambiguous multi-primary states.
 	if count >= cfg.EtcdUnavailableRecoveryCycles && desiredStable && cfg.DeadClusterRecovery && reachable == 0 {
 		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
 		if !safe {
@@ -872,14 +872,15 @@ func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, des
 					fnfFlagFile, fnfCooldownFile, noQuorumFile)
 			}
 			return
-		} else if directoryIsEmpty("/var/lib/postgresql/data") {
-			// This node is an explicitly empty follower. Drop only its local etcd
+		} else {
+			// Every non-authority node drops only its empty/obsolete local etcd
 			// state so etcd-start can register it as a learner with the authority.
+			// PGDATA is never removed here; Patroni will retain or rewind replicas.
 			if !etcdRestartCooldownExpired() {
 				pkglog.Infof("waiting for recent etcd restart to settle before joining authority %s", authority.NodeName)
 				return
 			}
-			pkglog.Warnf("sole PostgreSQL authority is %s — resetting local etcd to join it as a learner", authority.NodeName)
+			pkglog.Warnf("PostgreSQL recovery authority is %s — resetting local etcd to join it as a learner", authority.NodeName)
 			if err := wipeDir("/var/lib/etcd"); err != nil {
 				pkglog.Errorf("failed to reset local etcd follower state: %v", err)
 				return

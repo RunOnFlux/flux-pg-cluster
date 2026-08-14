@@ -181,6 +181,25 @@ func TestEtcdDataDirectoryIsFreshRejectsMarkerDirectory(t *testing.T) {
 	}
 }
 
+func TestPostgresDurableRoleUsesRecoverySignalFiles(t *testing.T) {
+	dir := t.TempDir()
+	if role := postgresDurableRole(dir); role != "" {
+		t.Fatalf("empty PGDATA role = %q, want unknown", role)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "global"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if role := postgresDurableRole(dir); role != "primary" {
+		t.Fatalf("PGDATA without a recovery signal role = %q, want primary", role)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "standby.signal"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if role := postgresDurableRole(dir); role != "replica" {
+		t.Fatalf("PGDATA with standby.signal role = %q, want replica", role)
+	}
+}
+
 func TestIdentityEndpointRequiresSharedProbeToken(t *testing.T) {
 	cfg := bootstrapTestConfig()
 
