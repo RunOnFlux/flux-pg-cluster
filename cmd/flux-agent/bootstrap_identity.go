@@ -33,6 +33,9 @@ type nodeIdentity struct {
 	PGDataEmpty              bool     `json:"pgdata_empty"`
 	PostgresSystemIdentifier string   `json:"postgres_system_id,omitempty"`
 	PostgresDurableRole      string   `json:"postgres_durable_role,omitempty"`
+	PostgresControlState     string   `json:"postgres_control_state,omitempty"`
+	PostgresTimeline         uint64   `json:"postgres_timeline,omitempty"`
+	PostgresWALPosition      string   `json:"postgres_wal_position,omitempty"`
 	EtcdDataEmpty            bool     `json:"etcd_data_empty"`
 	MembershipView           []string `json:"membership_view"`
 }
@@ -59,8 +62,13 @@ func localNodeIdentity(cfg *config.Config) nodeIdentity {
 		MembershipView: membershipNames(cfg.EtcdInitialCluster),
 	}
 	if !identity.PGDataEmpty {
-		if systemID, err := readLocalPGSystemID(); err == nil {
-			identity.PostgresSystemIdentifier = systemID
+		if control, err := readLocalPGControlData(); err == nil {
+			identity.PostgresSystemIdentifier = control.SystemID
+			identity.PostgresControlState = control.State
+			if position, err := control.recoveryPosition(); err == nil {
+				identity.PostgresTimeline = position.Timeline
+				identity.PostgresWALPosition = formatPostgresLSN(position.LSN)
+			}
 		}
 		identity.PostgresDurableRole = postgresDurableRole("/var/lib/postgresql/data")
 	}
@@ -255,9 +263,11 @@ func evaluateFreshPeerEvidence(cfg *config.Config, results []peerIdentityResult)
 // evaluateRecoveryAuthority permits automatic dead-cluster recovery only when
 // every expected node provides authenticated, mutually consistent evidence.
 // A single PGDATA-bearing node remains authoritative for restore workflows. If
-// multiple copies exist after total DCS loss, they must share one system ID,
-// every etcd directory must be empty, and exactly one copy must carry the
-// durable primary role. Any ambiguity blocks creation of a new epoch.
+// multiple copies exist after total DCS loss, they must share one system ID and
+// every etcd directory must be empty. A unique durable primary is preferred;
+// if it was permanently lost, replicas must share one timeline and the most
+// advanced durable WAL position wins (with deterministic ordering for ties).
+// Any ambiguity blocks creation of a new epoch.
 func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results []peerIdentityResult) (recoveryAuthority, bool, string) {
 	expectedPeers := len(otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName))
 	if len(results) != expectedPeers {
@@ -289,10 +299,10 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 			allEtcdEmpty = false
 		}
 		if identity.PGDataEmpty {
-			if identity.PostgresSystemIdentifier != "" || identity.PostgresDurableRole != "" {
+			if identity.PostgresSystemIdentifier != "" || identity.PostgresDurableRole != "" ||
+				identity.PostgresTimeline != 0 || identity.PostgresWALPosition != "" {
 				return recoveryAuthority{}, false, fmt.Sprintf(
-					"node %s reports empty PGDATA with system ID %q and role %q",
-					result.IP, identity.PostgresSystemIdentifier, identity.PostgresDurableRole)
+					"node %s reports empty PGDATA with PostgreSQL identity metadata", result.IP)
 			}
 			continue
 		}
@@ -318,6 +328,7 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 
 	systemID := dataNodes[0].Identity.PostgresSystemIdentifier
 	var primary *peerIdentityResult
+	var replicas []peerIdentityResult
 	for i := range dataNodes {
 		node := &dataNodes[i]
 		identity := node.Identity
@@ -334,14 +345,25 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 			}
 			primary = node
 		case "replica":
-			// Expected for every non-authoritative PGDATA copy.
+			replicas = append(replicas, *node)
 		default:
 			return recoveryAuthority{}, false, fmt.Sprintf(
 				"node %s has PostgreSQL data but durable role %q is ambiguous", node.IP, identity.PostgresDurableRole)
 		}
 	}
 	if primary == nil {
-		return recoveryAuthority{}, false, "multiple PostgreSQL copies exist but none has the durable primary role"
+		selected, position, reason, ok := selectMostAdvancedReplica(replicas)
+		if !ok {
+			return recoveryAuthority{}, false, reason
+		}
+		authority := recoveryAuthority{
+			IP:       selected.IP,
+			NodeName: selected.Identity.NodeName,
+			SystemID: systemID,
+		}
+		return authority, true, fmt.Sprintf(
+			"former primary is absent; all expected nodes selected %s as the most advanced surviving replica at timeline %d LSN %s",
+			authority.NodeName, position.Timeline, formatPostgresLSN(position.LSN))
 	}
 	authority := recoveryAuthority{
 		IP:       primary.IP,
@@ -351,6 +373,35 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 	return authority, true, fmt.Sprintf(
 		"all expected nodes confirmed total DCS loss and %s as the unique durable PostgreSQL primary",
 		authority.NodeName)
+}
+
+func selectMostAdvancedReplica(replicas []peerIdentityResult) (peerIdentityResult, postgresRecoveryPosition, string, bool) {
+	if len(replicas) == 0 {
+		return peerIdentityResult{}, postgresRecoveryPosition{},
+			"multiple PostgreSQL copies exist but no durable primary or replica candidate was found", false
+	}
+	var selected peerIdentityResult
+	var best postgresRecoveryPosition
+	for _, replica := range replicas {
+		identity := replica.Identity
+		lsn, err := parsePostgresLSN(identity.PostgresWALPosition)
+		if err != nil || identity.PostgresTimeline == 0 || lsn == 0 {
+			return peerIdentityResult{}, postgresRecoveryPosition{}, fmt.Sprintf(
+				"replica %s has no readable durable WAL position", replica.IP), false
+		}
+		position := postgresRecoveryPosition{Timeline: identity.PostgresTimeline, LSN: lsn}
+		if best.Timeline != 0 && position.Timeline != best.Timeline {
+			return peerIdentityResult{}, postgresRecoveryPosition{}, fmt.Sprintf(
+				"replica timelines disagree: node %s has timeline %d, expected %d",
+				replica.IP, position.Timeline, best.Timeline), false
+		}
+		if best.Timeline == 0 || position.LSN > best.LSN ||
+			(position.LSN == best.LSN && identity.NodeName < selected.Identity.NodeName) {
+			selected = replica
+			best = position
+		}
+	}
+	return selected, best, "", true
 }
 
 func discoverRecoveryAuthority(cfg *config.Config) (recoveryAuthority, bool, string) {

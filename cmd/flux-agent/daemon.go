@@ -776,8 +776,89 @@ func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []s
 	supervisorctl("start", "patroni")
 }
 
-// readLocalPGSystemID reads the PostgreSQL system identifier from pg_controldata.
-func readLocalPGSystemID() (string, error) {
+type postgresControlData struct {
+	SystemID                string
+	State                   string
+	CheckpointLSN           string
+	CheckpointTimeline      uint64
+	MinimumRecoveryLSN      string
+	MinimumRecoveryTimeline uint64
+}
+
+type postgresRecoveryPosition struct {
+	Timeline uint64
+	LSN      uint64
+}
+
+func parsePostgresLSN(value string) (uint64, error) {
+	parts := strings.Split(strings.TrimSpace(value), "/")
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid PostgreSQL LSN %q", value)
+	}
+	high, err := strconv.ParseUint(parts[0], 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid PostgreSQL LSN %q: %w", value, err)
+	}
+	low, err := strconv.ParseUint(parts[1], 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid PostgreSQL LSN %q: %w", value, err)
+	}
+	return high<<32 | low, nil
+}
+
+func formatPostgresLSN(value uint64) string {
+	return fmt.Sprintf("%X/%X", value>>32, value&0xffffffff)
+}
+
+func parsePostgresControlData(out string) postgresControlData {
+	var control postgresControlData
+	for _, raw := range strings.Split(out, "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(raw), ":")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(key) {
+		case "Database system identifier":
+			control.SystemID = value
+		case "Database cluster state":
+			control.State = value
+		case "Latest checkpoint location":
+			control.CheckpointLSN = value
+		case "Latest checkpoint's TimeLineID":
+			control.CheckpointTimeline, _ = strconv.ParseUint(value, 10, 64)
+		case "Minimum recovery ending location":
+			control.MinimumRecoveryLSN = value
+		case "Min recovery ending loc's timeline":
+			control.MinimumRecoveryTimeline, _ = strconv.ParseUint(value, 10, 64)
+		}
+	}
+	return control
+}
+
+func (control postgresControlData) recoveryPosition() (postgresRecoveryPosition, error) {
+	var best postgresRecoveryPosition
+	consider := func(timeline uint64, lsnText string) {
+		lsn, err := parsePostgresLSN(lsnText)
+		if err != nil || timeline == 0 || lsn == 0 {
+			return
+		}
+		if timeline > best.Timeline || (timeline == best.Timeline && lsn > best.LSN) {
+			best = postgresRecoveryPosition{Timeline: timeline, LSN: lsn}
+		}
+	}
+	consider(control.CheckpointTimeline, control.CheckpointLSN)
+	consider(control.MinimumRecoveryTimeline, control.MinimumRecoveryLSN)
+	if best.Timeline == 0 || best.LSN == 0 {
+		return postgresRecoveryPosition{}, fmt.Errorf("no durable PostgreSQL recovery position in pg_controldata")
+	}
+	return best, nil
+}
+
+// readLocalPGControlData reads durable PostgreSQL identity and recovery
+// progress without starting PostgreSQL. This remains available while etcd and
+// Patroni are down during control-plane recovery.
+func readLocalPGControlData() (postgresControlData, error) {
 	// Find pg_controldata across common PostgreSQL versions.
 	candidates := []string{
 		"/usr/lib/postgresql/16/bin/pg_controldata",
@@ -793,21 +874,26 @@ func readLocalPGSystemID() (string, error) {
 		}
 	}
 	if pgCtl == "" {
-		return "", fmt.Errorf("pg_controldata not found")
+		return postgresControlData{}, fmt.Errorf("pg_controldata not found")
 	}
 	out, err := exec.Command(pgCtl, "/var/lib/postgresql/data").Output()
 	if err != nil {
-		return "", fmt.Errorf("pg_controldata: %w", err)
+		return postgresControlData{}, fmt.Errorf("pg_controldata: %w", err)
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "Database system identifier") {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1]), nil
-			}
-		}
+	control := parsePostgresControlData(string(out))
+	if control.SystemID == "" {
+		return postgresControlData{}, fmt.Errorf("system identifier not found in pg_controldata output")
 	}
-	return "", fmt.Errorf("system identifier not found in pg_controldata output")
+	return control, nil
+}
+
+// readLocalPGSystemID reads the PostgreSQL system identifier from pg_controldata.
+func readLocalPGSystemID() (string, error) {
+	control, err := readLocalPGControlData()
+	if err != nil {
+		return "", err
+	}
+	return control.SystemID, nil
 }
 
 func membersIPs(members []etcdmgr.Member, clientPort int) []string {
