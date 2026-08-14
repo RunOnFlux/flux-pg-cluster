@@ -113,6 +113,26 @@ func runEtcdStart(args []string) {
 		}
 	}
 
+	// The daemon has already gathered repeated unanimous recovery evidence and
+	// writes the force-new flag to wake the selected authority. When this node's
+	// etcd directory is empty there is no old cluster to force; consume the flag
+	// before the normal peer-discovery window, independently revalidate the
+	// authority, and bootstrap a new single-member control plane immediately.
+	// Consuming the flag here also prevents it from being misapplied later if a
+	// peer happens to recover while validation is in progress.
+	if clusterState == "" && !dataPresent && cfg.DeadClusterRecovery && dirExists("/var/lib/postgresql/data/global") {
+		state, hinted := consumeEmptyDCSRecoveryHint(cfg, *dataDir, *forceNewClusterFlagFile, decideBootstrap)
+		if hinted {
+			if state == "new" {
+				clusterState = state
+				configureSingleMemberBootstrap(cfg)
+				pkglog.Warnf("empty-DCS recovery hint authorized — bootstrapping selected PostgreSQL authority immediately")
+			} else {
+				pkglog.Errorf("empty-DCS recovery hint rejected by current peer evidence — returning to safe discovery")
+			}
+		}
+	}
+
 	if clusterState == "" {
 		pkglog.Infof("no data directory — attempting to join existing cluster")
 		candidate := bootstrapCandidate(cfg.EtcdInitialCluster)
@@ -167,9 +187,7 @@ func runEtcdStart(args []string) {
 			// immediately. A multi-member --initial-cluster with state=new
 			// requires ALL listed members to start simultaneously, which is
 			// impossible when non-candidates are doing member-add joins.
-			myPeerURL := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), cfg.MyIP, cfg.HostEtcdPeerPort)
-			cfg.EtcdInitialCluster = cfg.MyName + "=" + myPeerURL
-			pkglog.Infof("single-candidate bootstrap: ETCD_INITIAL_CLUSTER shrunk to %s", cfg.EtcdInitialCluster)
+			configureSingleMemberBootstrap(cfg)
 		}
 	}
 
@@ -203,6 +221,23 @@ func runEtcdStart(args []string) {
 			pkglog.Fatalf("exec etcd: %v", err)
 		}
 	}
+}
+
+func consumeEmptyDCSRecoveryHint(cfg *config.Config, dataDir, flagFile string,
+	decide func(*config.Config, string) string) (string, bool) {
+	if !fileExists(flagFile) {
+		return "", false
+	}
+	// The hint is one-shot. A stale force-new flag must never survive a failed
+	// validation and later apply to an etcd cluster that another node recovered.
+	_ = os.Remove(flagFile)
+	return decide(cfg, dataDir), true
+}
+
+func configureSingleMemberBootstrap(cfg *config.Config) {
+	myPeerURL := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), cfg.MyIP, cfg.HostEtcdPeerPort)
+	cfg.EtcdInitialCluster = cfg.MyName + "=" + myPeerURL
+	pkglog.Infof("single-candidate bootstrap: ETCD_INITIAL_CLUSTER shrunk to %s", cfg.EtcdInitialCluster)
 }
 
 func bootstrapRetryDelay(configuredSeconds int) time.Duration {

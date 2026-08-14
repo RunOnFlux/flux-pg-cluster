@@ -3,12 +3,62 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/RunOnFlux/flux-pg-cluster/internal/config"
 )
+
+func TestEmptyDCSRecoveryHintBypassesPeerDiscoveryAfterRevalidation(t *testing.T) {
+	cfg := recoveryTestConfig()
+	flagFile := filepath.Join(t.TempDir(), "force-new-cluster")
+	if err := os.WriteFile(flagFile, []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	state, hinted := consumeEmptyDCSRecoveryHint(cfg, "/var/lib/etcd", flagFile,
+		func(gotCfg *config.Config, dataDir string) string {
+			calls++
+			if gotCfg != cfg || dataDir != "/var/lib/etcd" {
+				t.Fatalf("unexpected recovery decision inputs: cfg=%p dataDir=%s", gotCfg, dataDir)
+			}
+			return "new"
+		})
+	if !hinted || state != "new" || calls != 1 {
+		t.Fatalf("hinted=%v state=%q calls=%d, want true/new/1", hinted, state, calls)
+	}
+	if fileExists(flagFile) {
+		t.Fatal("empty-DCS recovery hint must be consumed before bootstrap")
+	}
+}
+
+func TestRejectedEmptyDCSRecoveryHintIsOneShot(t *testing.T) {
+	cfg := recoveryTestConfig()
+	flagFile := filepath.Join(t.TempDir(), "force-new-cluster")
+	if err := os.WriteFile(flagFile, []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state, hinted := consumeEmptyDCSRecoveryHint(cfg, "/var/lib/etcd", flagFile,
+		func(*config.Config, string) string { return "" })
+	if !hinted || state != "" {
+		t.Fatalf("hinted=%v state=%q, want true/empty", hinted, state)
+	}
+	if fileExists(flagFile) {
+		t.Fatal("rejected hint must not survive and later force a recovered cluster")
+	}
+}
+
+func TestConfigureSingleMemberBootstrapUsesSelectedAuthority(t *testing.T) {
+	cfg := recoveryTestConfig()
+	configureSingleMemberBootstrap(cfg)
+	want := "node-192-0-2-11=https://192.0.2.11:12380"
+	if cfg.EtcdInitialCluster != want {
+		t.Fatalf("single-member topology = %q, want %q", cfg.EtcdInitialCluster, want)
+	}
+}
 
 func TestJoinDiscoveryReloadsTopologyOnEveryAttempt(t *testing.T) {
 	cfg := recoveryTestConfig()
