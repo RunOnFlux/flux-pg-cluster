@@ -450,6 +450,7 @@ func triggerForceNewCluster(cfg *config.Config, sslOpts []string, systemID, flag
 }
 
 var requiredPatroniHBA = []string{
+	"local all postgres peer",
 	"hostssl replication replicator 0.0.0.0/0 cert clientcert=verify-full",
 	"hostssl all all 0.0.0.0/0 md5",
 	"host replication replicator 0.0.0.0/0 md5",

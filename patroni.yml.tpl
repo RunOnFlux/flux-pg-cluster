@@ -67,6 +67,7 @@ bootstrap:
   - auth-local: peer
 
   pg_hba:
+  - local all postgres peer
   - hostssl replication replicator 0.0.0.0/0 cert clientcert=verify-full
   - hostssl all all 0.0.0.0/0 md5
   - host replication replicator 0.0.0.0/0 md5

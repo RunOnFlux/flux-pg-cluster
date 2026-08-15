@@ -413,6 +413,9 @@ func TestMergePatroniRecoveryConfigPreservesCustomSettings(t *testing.T) {
 	if pg["use_pg_rewind"] != true || len(pg["pg_hba"].([]interface{})) != len(requiredPatroniHBA)+1 {
 		t.Fatal("recovery invariants were not applied")
 	}
+	if !containsString(interfaceStrings(pg["pg_hba"].([]interface{})), "local all postgres peer") {
+		t.Fatal("local peer authentication for credential reconciliation was not restored")
+	}
 	if pg["pg_hba"].([]interface{})[0] != "local all custom peer" {
 		t.Fatal("custom HBA rules were overwritten")
 	}
@@ -421,6 +424,16 @@ func TestMergePatroniRecoveryConfigPreservesCustomSettings(t *testing.T) {
 	if err != nil || changed || again != merged {
 		t.Fatalf("merge must be idempotent: changed=%v err=%v", changed, err)
 	}
+}
+
+func interfaceStrings(values []interface{}) []string {
+	strings := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			strings = append(strings, text)
+		}
+	}
+	return strings
 }
 
 func TestPostgresCredentialSQLIsIdempotentAndEscapesPasswords(t *testing.T) {
