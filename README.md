@@ -1,5 +1,5 @@
 # Flux PostgreSQL Cluster
-![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
 ![Docker](https://img.shields.io/badge/Docker-required-blue.svg)
@@ -22,6 +22,30 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 | `dev-pg15` | `development` | 15 |
 
 Use `latest` / `dev` for existing PostgreSQL 14 clusters. Use `pg15` / `dev-pg15` only for **new** clusters with fresh volumes — do not swap tags on existing PG 14 data directories.
+
+### pgvector
+
+The PostgreSQL 14 and 15 images include the
+[pgvector](https://github.com/pgvector/pgvector) server extension. It is
+installed on every HA node but is not enabled automatically, so upgrading an
+existing cluster does not modify any database. After every node has been
+redeployed with a pgvector-capable image, enable it once in each database that
+needs vector support:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Run the command through port 5433 so it reaches the current primary. Physical
+WAL replication carries the extension catalog, vector tables, data, and indexes
+to the replicas; the package installed in every image supplies the server-side
+library after failover. Each node continues to use its own persistent
+`/var/lib/postgresql/data` volume—do not share or filesystem-sync `PGDATA`
+between nodes.
+
+For an existing cluster, do not enable `vector` until all potential primary
+nodes have been upgraded. A node running an older image does not have the
+extension library and is not a safe failover target for databases that use it.
 
 ## Quick Start
 

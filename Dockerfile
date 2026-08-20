@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y \
     && apt-get install -y \
         postgresql-${POSTGRES_MAJOR} \
         postgresql-client-${POSTGRES_MAJOR} \
+        postgresql-${POSTGRES_MAJOR}-pgvector \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
