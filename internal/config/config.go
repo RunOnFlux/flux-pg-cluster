@@ -42,6 +42,9 @@ type Config struct {
 	PatroniEtcdHosts   string // node-local Patroni endpoints; self uses loopback
 	EtcdInitialCluster string // comma-separated name=URL pairs
 	ClusterIPs         []string
+	ExpectedSystemID   string
+	ClusterSeedIPs     string
+	RetiredClusterIPs  string
 
 	AllowNewClusterBootstrap      bool
 	AllowAnyNodeBootstrap         bool
@@ -128,16 +131,10 @@ func FromEnv() *Config {
 		EtcdPeerPort:                envInt("ETCD_PEER_PORT", 2380),
 		AllowNewClusterBootstrap:    envBool("ALLOW_NEW_CLUSTER_BOOTSTRAP", false),
 		AllowAnyNodeBootstrap:       envBool("ALLOW_ANY_NODE_BOOTSTRAP", false),
-		// AUTO_BOOTSTRAP_IF_FRESH lets the deterministic candidate initdb a new
-		// cluster only after every expected peer repeatedly and explicitly
-		// confirms empty PostgreSQL and etcd state with the same membership view.
-		// Unreachable or ambiguous peers always block this automatic path.
-		AutoBootstrapIfFresh: envBool("AUTO_BOOTSTRAP_IF_FRESH", true),
-		DeadClusterRecovery:  envBool("DEAD_CLUSTER_RECOVERY", true),
-		// ALLOW_PG_DATA_WIPE defaults to FALSE. The updater's system-ID self-heal
-		// will never delete /var/lib/postgresql/data unless this is explicitly set;
-		// instead it logs a loud, actionable error and leaves the data intact. This
-		// is the load-bearing guard against a stray/empty epoch wiping real data.
+		// Legacy bootstrap/wipe flags remain parseable for upgrades but cannot
+		// authorize initdb or deletion. First creation is an explicit command.
+		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", false),
+		DeadClusterRecovery:           envBool("DEAD_CLUSTER_RECOVERY", true),
 		AllowPGDataWipe:               envBool("ALLOW_PG_DATA_WIPE", false),
 		EtcdJoinMaxRetries:            envInt("ETCD_JOIN_MAX_RETRIES", 12),
 		EtcdJoinRetryDelaySeconds:     envInt("ETCD_JOIN_RETRY_DELAY_SECONDS", 10),
@@ -160,6 +157,9 @@ func FromEnv() *Config {
 		PatroniSynchronousNodeCount:   envInt("PATRONI_SYNCHRONOUS_NODE_COUNT", 1),
 		PatroniFailsafeMode:           envBool("PATRONI_FAILSAFE_MODE", true),
 		FluxAPIURL:                    env("FLUX_API_URL", "https://api.runonflux.io"),
+		ExpectedSystemID:              env("EXPECTED_POSTGRES_SYSTEM_ID", ""),
+		ClusterSeedIPs:                env("CLUSTER_SEED_IPS", ""),
+		RetiredClusterIPs:             env("RETIRED_CLUSTER_IPS", ""),
 		ProxyEnabled:                  envBool("PROXY_ENABLED", true),
 		ProxyListenPort:               envInt("PROXY_LISTEN_PORT", 5433),
 		ProxyHealthInterval:           envInt("PROXY_HEALTH_INTERVAL_SECONDS", 3),
@@ -217,6 +217,12 @@ func decodeShellValue(val string) string {
 
 func (c *Config) applyKV(key, val string) {
 	switch key {
+	case "EXPECTED_POSTGRES_SYSTEM_ID":
+		c.ExpectedSystemID = val
+	case "CLUSTER_SEED_IPS":
+		c.ClusterSeedIPs = val
+	case "RETIRED_CLUSTER_IPS":
+		c.RetiredClusterIPs = val
 	case "MY_NAME":
 		c.MyName = val
 	case "MY_IP":
@@ -314,6 +320,9 @@ func (c *Config) applyKV(key, val string) {
 // subcommands and the legacy shell scripts can read them.
 func (c *Config) WriteClusterEnv() error {
 	lines := []string{
+		"EXPECTED_POSTGRES_SYSTEM_ID=" + shellQuoteValue(c.ExpectedSystemID),
+		"CLUSTER_SEED_IPS=" + shellQuoteValue(c.ClusterSeedIPs),
+		"RETIRED_CLUSTER_IPS=" + shellQuoteValue(c.RetiredClusterIPs),
 		"MY_NAME=" + c.MyName,
 		"MY_IP=" + c.MyIP,
 		"ETCD_HOSTS=" + c.EtcdHosts,

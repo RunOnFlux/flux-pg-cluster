@@ -9,9 +9,35 @@ import pytest
 import urllib3
 
 from tests.helpers.cluster import ClusterManager
+from tests.helpers.lifecycle import start_new_cluster
 from tests.helpers.mock_api import MockApiClient
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    manager = item.funcargs.get("cluster")
+    if report.when != "call" or not report.failed or manager is None:
+        return
+    # Preserve failure evidence before fixtures remove disposable containers.
+    for name in manager._all_node_names():
+        try:
+            result = manager._container(name).exec_run([
+                "sh", "-c",
+                "tail -n 18 /var/log/supervisor/etcd.out.log; "
+                "tail -n 18 /var/log/supervisor/updater.out.log; "
+                "tail -n 18 /var/log/supervisor/patroni.err.log",
+            ])
+            report.sections.append((name + " agent diagnostics", result.output.decode(errors="replace")))
+        except Exception as exc:
+            report.sections.append((name + " diagnostics unavailable", str(exc)))
+
+
+def pytest_addoption(parser):
+    parser.addoption("--skip-image-build", action="store_true", help="Reuse images already built from the current runtime source")
 
 
 @pytest.fixture(scope="session")
@@ -39,8 +65,9 @@ def pg_password(project_dir: Path) -> str:
 
 
 @pytest.fixture(scope="session")
-def built_image(project_dir: Path, compose_cmd: list[str]):
-    subprocess.run(compose_cmd + ["build"], cwd=project_dir, check=True)
+def built_image(project_dir: Path, compose_cmd: list[str], request):
+    if not request.config.getoption("--skip-image-build"):
+        subprocess.run(compose_cmd + ["build"], cwd=project_dir, check=True)
     return True
 
 
@@ -48,7 +75,7 @@ def built_image(project_dir: Path, compose_cmd: list[str]):
 def running_cluster(project_dir: Path, compose_cmd: list[str], built_image):
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
     time.sleep(10)  # Wait for Docker to fully release networks/volumes before starting
-    subprocess.run(compose_cmd + ["up", "-d"], cwd=project_dir, check=True)
+    start_new_cluster(project_dir, compose_cmd)
     yield
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
     time.sleep(10)  # Wait for Docker to fully clean up before next module starts

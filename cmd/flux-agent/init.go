@@ -84,12 +84,26 @@ func runInit(args []string) {
 		pkglog.Warnf("No cluster IPs from API, using MY_IP only")
 		ips = []string{myIP}
 	}
+	ips, err = discoveryIPsAt(cfg, postgresDataDir, ips)
+	if err != nil {
+		pkglog.Fatalf("load durable cluster membership: %v", err)
+	}
+	if fileExists(postgresDataDir + "/global/pg_control") {
+		id, err := expectedSystemID(cfg)
+		if err != nil {
+			pkglog.Fatalf("cluster identity: %v", err)
+		}
+		cfg.ExpectedSystemID = id
+	}
 	cfg.ClusterIPs = ips
 	pkglog.Infof("Cluster IPs: %v", ips)
 
 	pkglog.Section("CLUSTER CONFIGURATION GENERATION")
 	cfg.MyName = nodeNameFromIP(myIP)
 	buildEtcdConfig(cfg)
+	if err := rememberClusterAt(cfg, postgresDataDir, candidateIPs(cfg)); err != nil {
+		pkglog.Fatalf("persist cluster identity: %v", err)
+	}
 	pkglog.Infof("MY_NAME: %s", cfg.MyName)
 	pkglog.Infof("ETCD_HOSTS: %s", cfg.EtcdHosts)
 	pkglog.Infof("ETCD_INITIAL_CLUSTER: %s", cfg.EtcdInitialCluster)
@@ -429,6 +443,7 @@ func renderPatroniConfig(in, out string, cfg *config.Config, pgBinDir string) er
 		postgresSSL = "on"
 	}
 	replacements := map[string]string{
+		"__PATRONI_SCOPE__":                 escapeYAMLSingle(cfg.PatroniScope),
 		"__MY_NAME__":                       cfg.MyName,
 		"__MY_IP__":                         cfg.MyIP,
 		"__PATRONI_ETCD_HOSTS__":            cfg.PatroniEtcdHosts,

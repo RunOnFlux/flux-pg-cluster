@@ -10,7 +10,7 @@ services:
 
   postgres-node1:
     environment:
-      UPDATE_INTERVAL_SECONDS: "15"
+      UPDATE_INTERVAL_SECONDS: "5"
       DESIRED_STATE_STABILITY_CYCLES: "2"
       PATRONI_TTL: "15"
       PATRONI_LOOP_WAIT: "5"
@@ -19,13 +19,16 @@ services:
       FNF_COOLDOWN_SECS: "120"
       # Keep discovery tests fast; production retains the longer default.
       ETCD_JOIN_MAX_RETRIES: "3"
-      # System-ID self-heal wipe is opt-in in production (default off).
+      ETCD_JOIN_RETRY_DELAY_SECONDS: "2"
+      BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS: "1"
+      BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS: "2"
+      # Legacy opt-in must not bypass the pinned identity or preserve-data policy.
       ALLOW_PG_DATA_WIPE: "true"
       PG_WIPE_COOLDOWN_SECS: "60"
 
   postgres-node2:
     environment:
-      UPDATE_INTERVAL_SECONDS: "15"
+      UPDATE_INTERVAL_SECONDS: "5"
       DESIRED_STATE_STABILITY_CYCLES: "2"
       PATRONI_TTL: "15"
       PATRONI_LOOP_WAIT: "5"
@@ -33,12 +36,15 @@ services:
       PATRONI_MASTER_START_TIMEOUT: "60"
       FNF_COOLDOWN_SECS: "120"
       ETCD_JOIN_MAX_RETRIES: "3"
+      ETCD_JOIN_RETRY_DELAY_SECONDS: "2"
+      BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS: "1"
+      BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS: "2"
       ALLOW_PG_DATA_WIPE: "true"
       PG_WIPE_COOLDOWN_SECS: "60"
 
   postgres-node3:
     environment:
-      UPDATE_INTERVAL_SECONDS: "15"
+      UPDATE_INTERVAL_SECONDS: "5"
       DESIRED_STATE_STABILITY_CYCLES: "2"
       PATRONI_TTL: "15"
       PATRONI_LOOP_WAIT: "5"
@@ -46,5 +52,8 @@ services:
       PATRONI_MASTER_START_TIMEOUT: "60"
       FNF_COOLDOWN_SECS: "120"
       ETCD_JOIN_MAX_RETRIES: "3"
+      ETCD_JOIN_RETRY_DELAY_SECONDS: "2"
+      BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS: "1"
+      BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS: "2"
       ALLOW_PG_DATA_WIPE: "true"
       PG_WIPE_COOLDOWN_SECS: "60"

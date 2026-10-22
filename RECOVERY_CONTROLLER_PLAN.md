@@ -1,3 +1,5 @@
+> **Superseded safety assumptions:** This proposal predates the October 2026 incident. Flux membership is a discovery hint, not authority to remove or fence healthy members. Timeout-based absence cannot prove fencing. The implemented conservative policy is documented in [CLUSTER_SAFETY.md](CLUSTER_SAFETY.md); any future controller must preserve those invariants. The Flux-authoritative and availability-first rules below are historical proposals and must not be implemented as written.
+
 # Autonomous Recovery Controller Plan
 
 ## Purpose

@@ -451,3 +451,28 @@ func TestPostgresCredentialSQLIsIdempotentAndEscapesPasswords(t *testing.T) {
 		}
 	}
 }
+
+func TestEmptyDCSConfigurationKeepsConfiguredDurabilityPolicy(t *testing.T) {
+	cfg := recoveryTestConfig()
+	cfg.PatroniSynchronousMode = true
+	cfg.PatroniSynchronousModeStrict = true
+	cfg.PatroniSynchronousNodeCount = 2
+	cfg.PatroniFailsafeMode = true
+	cfg.PatroniUseSlots = true
+	raw, changed, err := mergePatroniRecoveryConfig("", cfg)
+	if err != nil || !changed {
+		t.Fatalf("create DCS configuration: %v %v", changed, err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"synchronous_mode", "synchronous_mode_strict", "failsafe_mode"} {
+		if got[key] != true {
+			t.Fatalf("configured %s lost: %s", key, raw)
+		}
+	}
+	if got["synchronous_node_count"] != float64(2) || got["postgresql"].(map[string]interface{})["use_slots"] != true {
+		t.Fatal(raw)
+	}
+}

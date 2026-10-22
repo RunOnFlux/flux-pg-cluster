@@ -1,42 +1,11 @@
-"""
-EC4: Patroni system ID mismatch self-healing.
+"""Pinned initialization identity repair and isolated replacement refusal.
 
-Two production scenarios are covered:
-
-  EC4a – Stale /initialize key (Case 1 in checkPatroniSystemID)
-    After a dead-cluster-recovery a fresh node briefly bootstraps PG, sets
-    /patroni/<app>/initialize to its new system ID, then crashes or yields.
-    The surviving cluster members have the OLD system ID.  Any node that
-    restarts during this window will crash-loop in Patroni with
-    "CRITICAL: system ID mismatch".
-
-    The daemon's checkPatroniSystemID detects that no running peer confirms
-    the /initialize value and the primary has a different system ID →
-    it updates /initialize to the primary's system ID so crash-looping
-    replicas can rejoin without touching their PG data.
-
-  EC4b – Isolated fresh node cannot create a competing epoch
-    A completely fresh replacement may temporarily see only itself during
-    high node churn. It must not infer that the cluster is new. Bootstrap is
-    allowed only after every expected peer is reachable and repeatedly
-    confirms empty PostgreSQL and etcd state with the same membership view.
-
-Data-safety note (post-incident hardening):
-  The PG data wipe in Case 2 is destructive, so it is now OPT-IN via
-  ALLOW_PG_DATA_WIPE (default false) and additionally requires the live
-  PRIMARY (not merely any re-cloned replica) to confirm the authoritative
-  system ID before any data is deleted. This prevents a stray/empty epoch —
-  or a replica cloned from one — from causing surviving nodes to wipe real
-  data. Neither scenario in this module relies on deleting PostgreSQL data.
-
-Timing with test overrides (UPDATE_INTERVAL=15s):
-  EC4a: inject bad key → kill/restart replica → daemon corrects key in
-        ≤2 update cycles (~30s) → Patroni rejoins.  Timeout: 180s.
-  EC4b: isolated fresh node remains uninitialized while the original cluster
-        is unavailable; the original epoch recovers unchanged.
+A stale /initialize value may be repaired only toward the verified deployment
+identity using compare-and-swap. Isolated empty replacements cannot run initdb.
 """
 
 import subprocess
+from tests.helpers.lifecycle import start_new_cluster
 import time
 
 import docker as docker_sdk
@@ -54,7 +23,7 @@ from tests.helpers.mock_api import MockApiClient
 @pytest.fixture(scope="module")
 def running_cluster(project_dir, compose_cmd, built_image):
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
-    subprocess.run(compose_cmd + ["up", "-d"], cwd=project_dir, check=True)
+    start_new_cluster(project_dir, compose_cmd)
     yield
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
 
@@ -80,8 +49,8 @@ def mock_api(cluster):
 def test_stale_initialize_key_is_healed(cluster: ClusterManager, mock_api: MockApiClient):
     """
     EC4a: Injecting a fake /initialize key causes a restarted replica to
-    crash-loop.  The daemon must detect that the primary's system ID differs
-    from /initialize and update the key, allowing the replica to rejoin.
+    crash-loop.  The daemon must detect that the unique primary confirms the pinned identity
+    and compare-and-swap the stale key, allowing the replica to rejoin.
     """
     cluster.wait_for_healthy(expected_members=3, timeout=120)
     # Explicitly wait for etcd gRPC to be ready on the node we'll query.

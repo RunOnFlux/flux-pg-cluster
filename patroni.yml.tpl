@@ -1,4 +1,4 @@
-scope: postgres-cluster
+scope: '__PATRONI_SCOPE__'
 namespace: /patroni/
 name: __MY_NAME__
 
@@ -26,7 +26,9 @@ etcd3:
   key: /etc/ssl/cluster/etcd/client.key
 
 bootstrap:
-  method: initdb
+  method: explicit_creation_only
+  explicit_creation_only:
+    command: /app/flux-agent refuse-initdb
   dcs:
     ttl: __PATRONI_TTL__
     loop_wait: __PATRONI_LOOP_WAIT__
@@ -76,6 +78,7 @@ bootstrap:
   post_bootstrap: /app/post_bootstrap.sh
 
 postgresql:
+  pre_promote: /app/flux-agent verify-promotion
   listen: 0.0.0.0:__POSTGRES_PORT__
   connect_address: __MY_IP__:__HOST_POSTGRES_PORT__
   data_dir: /var/lib/postgresql/data

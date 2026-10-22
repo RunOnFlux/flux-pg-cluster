@@ -16,18 +16,9 @@ import (
 	pkglog "github.com/RunOnFlux/flux-pg-cluster/internal/log"
 )
 
-// runEtcdStart implements the state machine from start-etcd.sh:
-//
-//  1. Load cluster_env
-//  2. If data directory exists:
-//     a. Fast peer check — if any peer reachable, wipe local data (avoids
-//     disrupting running cluster) and force rejoin via member add.
-//     b. If no peers reachable, validate local data with temp etcd; if
-//     cluster-ID mismatch, wipe; otherwise start as existing.
-//  3. If no data (or wiped): try to join existing cluster via member add.
-//  4. If no peers, bootstrap new cluster (with safety guards).
-//  5. Finally exec etcd with the resolved CLUSTER_STATE (and --force-new-cluster
-//     if the flag file is present).
+// runEtcdStart preserves durable Raft state, joins only the pinned database's
+// DCS, and rebuilds a control plane only around proven existing PGDATA.
+// PostgreSQL creation is never part of this state machine.
 func runEtcdStart(args []string) {
 	fs := flag.NewFlagSet("etcd-start", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "/var/lib/etcd", "etcd data directory")
@@ -60,9 +51,9 @@ func runEtcdStart(args []string) {
 	markerFile := *dataDir + "/.etcd3_api"
 
 	clusterState := ""
-	forceRejoin := false
+	forceRejoin := !etcdHasLocalState(*dataDir)
 	dataPresent := false
-	if _, err := os.Stat(*dataDir + "/member/snap/db"); err == nil {
+	if etcdHasLocalState(*dataDir) {
 		dataPresent = true
 	}
 
@@ -80,6 +71,12 @@ func runEtcdStart(args []string) {
 			cancel()
 			if err == nil && len(members) > 0 {
 				anyPeerReachable = true
+				vctx, vcancel := context.WithTimeout(context.Background(), 5*time.Second)
+				identityErr := validatePeerCluster(vctx, cfg, ec)
+				vcancel()
+				if identityErr != nil {
+					pkglog.Fatalf("refusing etcd convergence: %v", identityErr)
+				}
 				if etcdmgr.FindByName(members, cfg.MyName) != nil {
 					pkglog.Infof("peer %s knows about us", ip)
 					peerKnowsUs = true
@@ -95,21 +92,15 @@ func runEtcdStart(args []string) {
 				pkglog.Infof("live peer confirms this member — preserving local etcd data")
 				clusterState = "existing"
 			} else {
-				pkglog.Infof("live peer does not recognize this member — wiping local etcd data for a clean rejoin")
-				if err := wipeDir(*dataDir); err != nil {
-					pkglog.Errorf("wipe data dir: %v", err)
+				pkglog.Infof("live peer does not recognize this member — archiving local etcd data for an identity-checked rejoin")
+				if err := archiveEtcdData(*dataDir); err != nil {
+					pkglog.Fatalf("archive etcd data: %v", err)
 				}
 				forceRejoin = true
 			}
 		} else {
-			pkglog.Infof("no peers reachable — starting temp etcd to verify local data...")
-			tempState, err := verifyLocalDataWithTempEtcd(cfg, *dataDir, *clusterToken, sslOpts, otherIPs)
-			if err != nil {
-				pkglog.Warnf("temp etcd verification inconclusive: %v — preserving data", err)
-				clusterState = "existing"
-			} else {
-				clusterState = tempState
-			}
+			pkglog.Infof("no peers reachable — preserving and starting existing etcd state")
+			clusterState = "existing"
 		}
 	}
 
@@ -156,8 +147,8 @@ func runEtcdStart(args []string) {
 				pkglog.Errorf("SPLIT-BRAIN GUARD: peers reachable but join failed — refusing to bootstrap new cluster")
 				os.Exit(1)
 			}
-			if forceRejoin {
-				pkglog.Errorf("rejoin was forced after wipe but no peer reachable — refusing unsafe bootstrap")
+			if forceRejoin && dataPresent {
+				pkglog.Errorf("rejoin was forced after archive but no peer reachable — refusing unsafe bootstrap")
 				os.Exit(1)
 			}
 			// Fresh installation remains restricted to the deterministic
@@ -193,14 +184,28 @@ func runEtcdStart(args []string) {
 
 	pkglog.Infof("CLUSTER_STATE=%s", clusterState)
 
-	// Check for force-new-cluster flag written by daemon's quorum recovery
+	// Revalidate the one-shot recovery hint at execution time. A stale file must
+	// never force a new Raft cluster after the network or policy has changed.
 	forceNewCluster := false
-	if _, err := os.Stat(*forceNewClusterFlagFile); err == nil {
-		pkglog.Infof("force-new-cluster flag detected — starting etcd with --force-new-cluster")
+	if fileExists(*forceNewClusterFlagFile) {
 		_ = os.Remove(*forceNewClusterFlagFile)
-		forceNewCluster = true
+		if !cfg.DeadClusterRecovery {
+			pkglog.Fatalf("force-new-cluster blocked: DEAD_CLUSTER_RECOVERY=false")
+		}
+		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
+		if !safe || authority.IP != cfg.MyIP {
+			pkglog.Fatalf("force-new-cluster blocked: %s", reason)
+		}
+		forceNewCluster = dataPresent && !anyDCSQuorum(cfg)
 	}
 
+	if clusterState == "new" {
+		token, err := newDCSBootstrapToken(*clusterToken)
+		if err != nil {
+			pkglog.Fatalf("create control-plane identity: %v", err)
+		}
+		*clusterToken = token
+	}
 	args2 := buildEtcdArgs(cfg, *dataDir, *clusterToken, clusterState, forceNewCluster, sslOpts)
 	pkglog.Infof("starting etcd: etcd %s", strings.Join(args2, " "))
 	// Write the restart marker before exec so the daemon's 90s cooldown kicks
@@ -299,77 +304,12 @@ func extractHostFromURL(u string) string {
 	return u
 }
 
-func wipeDir(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if err := os.RemoveAll(dir + "/" + e.Name()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// verifyLocalDataWithTempEtcd starts a temp etcd to confirm local data is from
-// the same cluster as the peers. Returns "existing" if data is valid, or
-// empty string + error if mismatch (data should be wiped).
-func verifyLocalDataWithTempEtcd(cfg *config.Config, dataDir, token string, sslOpts, otherIPs []string) (string, error) {
-	args := buildEtcdArgs(cfg, dataDir, token, "existing", false, sslOpts)
-	cmd := exec.Command("etcd", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("start temp etcd: %w", err)
-	}
-	defer func() {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_, _ = cmd.Process.Wait()
-		time.Sleep(2 * time.Second)
-	}()
-
-	time.Sleep(10 * time.Second)
-
-	// Query peers; if majority don't know us, wipe (return error so caller wipes)
-	localEndpoint := fmt.Sprintf("%s://127.0.0.1:%d", cfg.EtcdProtocol(), cfg.EtcdClientPort)
-	ec := etcdmgr.New(localEndpoint, sslOpts)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_, err := ec.MemberList(ctx)
-	cancel()
-	if err != nil {
-		return "existing", nil
-	}
-
-	matching, mismatched := 0, 0
-	for _, ip := range otherIPs {
-		endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
-		peer := etcdmgr.New(endpoint, sslOpts)
-		pctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		members, err := peer.MemberList(pctx)
-		cancel()
-		if err != nil {
-			continue
-		}
-		if etcdmgr.FindByName(members, cfg.MyName) != nil {
-			matching++
-		} else {
-			mismatched++
-		}
-	}
-
-	if mismatched > matching {
-		return "", fmt.Errorf("cluster ID mismatch (matching=%d mismatched=%d)", matching, mismatched)
-	}
-	return "existing", nil
-}
-
 // tryJoinExisting attempts to contact each known peer and register via member add.
 // Returns (state, rebuiltInitialCluster, error). joinedInitial is the new
 // ETCD_INITIAL_CLUSTER string derived from actual registered members (needed
 // to satisfy etcd v3.3's "member count is unequal" check).
 func tryJoinExisting(cfg *config.Config, sslOpts, otherIPs []string, forceRejoin bool, maxRetries int) (string, string, error) {
-	return tryJoinExistingWithLoader(cfg, sslOpts, otherIPs, forceRejoin, maxRetries, config.LoadClusterEnv)
+	return tryJoinExistingWithLoader(cfg, sslOpts, otherIPs, forceRejoin || !etcdHasLocalState("/var/lib/etcd"), maxRetries, config.LoadClusterEnv)
 }
 
 func tryJoinExistingWithLoader(cfg *config.Config, sslOpts, otherIPs []string, forceRejoin bool, maxRetries int,
@@ -403,6 +343,13 @@ func tryJoinExistingWithLoader(cfg *config.Config, sslOpts, otherIPs []string, f
 				continue
 			}
 			anyReachable = true
+			vctx, vcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			identityErr := validatePeerCluster(vctx, cfg, ec)
+			vcancel()
+			if identityErr != nil {
+				pkglog.Warnf("refusing peer %s: %v", ip, identityErr)
+				continue
+			}
 
 			existing := etcdmgr.FindByName(members, cfg.MyName)
 			if existing == nil {
@@ -417,8 +364,12 @@ func tryJoinExistingWithLoader(cfg *config.Config, sslOpts, otherIPs []string, f
 					}
 					pkglog.Infof("removing stale member entry (%s) on %s id=%s", reason, ip, existing.ID)
 					rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
-					_ = ec.MemberRemove(rctx, existing.ID)
+					removeErr := ec.MemberRemove(rctx, existing.ID)
 					rcancel()
+					if removeErr != nil {
+						pkglog.Warnf("remove stale member: %v", removeErr)
+						continue
+					}
 					time.Sleep(2 * time.Second)
 					// fall through to member add
 				} else {
@@ -447,8 +398,12 @@ func tryJoinExistingWithLoader(cfg *config.Config, sslOpts, otherIPs []string, f
 			// Rebuild ETCD_INITIAL_CLUSTER from actual registered members so
 			// etcd doesn't reject startup with "member count is unequal".
 			pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
-			updated, _ := ec.MemberList(pctx)
+			updated, listErr := ec.MemberList(pctx)
 			pcancel()
+			if listErr != nil {
+				pkglog.Warnf("read registered members: %v", listErr)
+				continue
+			}
 			rebuilt := rebuildInitialCluster(updated, cfg.MyName, peerURL)
 			pkglog.Infof("successfully registered in existing cluster as learner")
 			return "existing", rebuilt, nil
@@ -488,65 +443,27 @@ func rebuildInitialCluster(members []etcdmgr.Member, myName, myPeerURL string) s
 	return strings.Join(parts, ",")
 }
 
-// decideBootstrap implements the safety guards for bootstrapping a brand-new
-// cluster. Automatic bootstrap requires unanimous, repeated empty-state
-// confirmation from every expected peer. Unreachable peers are never treated
-// as empty.
+// decideBootstrap can rebuild only a control plane around preserved PGDATA.
+// PostgreSQL first creation is exclusively an offline operator command.
 func decideBootstrap(cfg *config.Config, dataDir string) string {
-	expectedCount := len(strings.Split(cfg.EtcdInitialCluster, ","))
-	etcdDataEmpty := !fileExists(dataDir + "/member/snap/db")
-	pgDataEmpty := !dirExists("/var/lib/postgresql/data/global")
-	strictlyEmpty := etcdDataDirectoryIsFresh(dataDir) && directoryIsEmpty("/var/lib/postgresql/data")
-
-	candidate := bootstrapCandidate(cfg.EtcdInitialCluster)
-
-	if !cfg.AllowNewClusterBootstrap {
-		if cfg.AutoBootstrapIfFresh && etcdDataEmpty && pgDataEmpty && strictlyEmpty {
-			if expectedCount <= 1 {
-				pkglog.Errorf("FRESH BOOTSTRAP BLOCKED: single-member empty state cannot prove this is a first deployment")
+	etcdDataEmpty := !etcdHasLocalState(dataDir)
+	pgDataEmpty := !fileExists(postgresDataDir + "/global/pg_control")
+	// Legacy flags are retained for config compatibility but cannot authorize
+	// PostgreSQL creation. Only create-cluster performs initdb, offline.
+	if etcdDataEmpty && !pgDataEmpty && cfg.DeadClusterRecovery {
+		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
+		if safe && authority.IP == cfg.MyIP {
+			if anyDCSQuorum(cfg) {
+				pkglog.Infof("DCS recovery cancelled: quorum has returned")
 				return ""
 			}
-			if cfg.MyName != candidate {
-				pkglog.Errorf("fresh non-candidate %s reached bootstrap path — refusing (only candidate %s may bootstrap)", cfg.MyName, candidate)
-				return ""
-			}
-			if !confirmFreshClusterWithPeers(cfg) {
-				pkglog.Errorf("fresh bootstrap denied: peer evidence was incomplete or unsafe")
-				return ""
-			}
-			pkglog.Infof("fresh multi-member install unanimously confirmed — auto-bootstrap")
+			pkglog.Warnf("rebuilding DCS for preserved PostgreSQL %s", authority.SystemID)
 			return "new"
 		}
-		// Dead-cluster recovery is authorized by data ownership, never by node
-		// ordering. Every expected peer must repeatedly identify the same sole
-		// PGDATA-bearing node. Multiple data copies or any unreachable peer block
-		// this path, which prevents a network partition from creating a new epoch.
-		if cfg.DeadClusterRecovery && etcdDataEmpty && !pgDataEmpty {
-			authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
-			if !safe {
-				pkglog.Errorf("DEAD CLUSTER RECOVERY BLOCKED: %s", reason)
-				return ""
-			}
-			if authority.IP != cfg.MyIP {
-				pkglog.Errorf("DEAD CLUSTER RECOVERY BLOCKED: sole authority is %s, not this node", authority.NodeName)
-				return ""
-			}
-			pkglog.Warnf("DEAD CLUSTER RECOVERY AUTHORIZED: %s", reason)
-			pkglog.Warnf("PG data will NOT be wiped; Patroni will start from existing data as primary")
-			return "new"
-		}
-		pkglog.Errorf("multi-member cluster, no peer found, refusing automatic bootstrap (split-brain prevention)")
-		pkglog.Errorf("conditions: candidate=%v etcd_empty=%v pg_empty=%v dirs_strictly_empty=%v auto_fresh=%v dead_recovery=%v",
-			cfg.MyName == candidate, etcdDataEmpty, pgDataEmpty, strictlyEmpty, cfg.AutoBootstrapIfFresh, cfg.DeadClusterRecovery)
-		return ""
+		pkglog.Errorf("DCS recovery blocked: %s", reason)
 	}
-
-	if !cfg.AllowAnyNodeBootstrap && cfg.MyName != candidate {
-		pkglog.Errorf("bootstrap restricted to deterministic candidate %s; this node is %s", candidate, cfg.MyName)
-		return ""
-	}
-	pkglog.Infof("explicit bootstrap override enabled — bootstrapping new cluster")
-	return "new"
+	pkglog.Errorf("empty-cluster bootstrap disabled; create-cluster or restore the pinned database")
+	return ""
 }
 
 // bootstrapCandidate returns the lexicographically smallest member name from

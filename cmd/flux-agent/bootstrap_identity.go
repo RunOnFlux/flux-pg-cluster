@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"sort"
@@ -38,6 +40,7 @@ type nodeIdentity struct {
 	PostgresWALPosition      string   `json:"postgres_wal_position,omitempty"`
 	EtcdDataEmpty            bool     `json:"etcd_data_empty"`
 	MembershipView           []string `json:"membership_view"`
+	IdentityError            string   `json:"identity_error,omitempty"`
 }
 
 type peerIdentityResult struct {
@@ -58,7 +61,7 @@ func localNodeIdentity(cfg *config.Config) nodeIdentity {
 		PatroniScope:   cfg.PatroniScope,
 		NodeName:       cfg.MyName,
 		PGDataEmpty:    directoryIsEmpty("/var/lib/postgresql/data"),
-		EtcdDataEmpty:  etcdDataDirectoryIsFresh("/var/lib/etcd"),
+		EtcdDataEmpty:  etcdRecoveryDataEmpty("/var/lib/etcd"),
 		MembershipView: membershipNames(cfg.EtcdInitialCluster),
 	}
 	if !identity.PGDataEmpty {
@@ -71,6 +74,11 @@ func localNodeIdentity(cfg *config.Config) nodeIdentity {
 			}
 		}
 		identity.PostgresDurableRole = postgresDurableRole("/var/lib/postgresql/data")
+	}
+	if fileExists(postgresDataDir + "/global/pg_control") {
+		if _, err := expectedSystemID(cfg); err != nil {
+			identity.IdentityError = err.Error()
+		}
 	}
 	return identity
 }
@@ -163,7 +171,13 @@ func writeIdentityResponse(w http.ResponseWriter, cfg *config.Config, r *http.Re
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(localNodeIdentity(cfg))
+	body, err := json.Marshal(localNodeIdentity(cfg))
+	if err != nil {
+		http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("X-Flux-Identity-Signature", identityResponseSignature(cfg, r.Header.Get("X-Flux-Probe-Nonce"), body))
+	_, _ = w.Write(body)
 }
 
 func probePeerIdentity(ctx context.Context, cfg *config.Config, ip string) (nodeIdentity, error) {
@@ -173,6 +187,12 @@ func probePeerIdentity(ctx context.Context, cfg *config.Config, ip string) (node
 		return nodeIdentity{}, err
 	}
 	req.Header.Set("X-Flux-Cluster-Probe", identityProbeToken(cfg))
+	var nonceBytes [32]byte
+	if _, err := rand.Read(nonceBytes[:]); err != nil {
+		return nodeIdentity{}, err
+	}
+	nonce := hex.EncodeToString(nonceBytes[:])
+	req.Header.Set("X-Flux-Probe-Nonce", nonce)
 	client := &http.Client{Timeout: time.Duration(cfg.BootstrapPeerProbeTimeout) * time.Second}
 	resp, err := client.Do(req)
 	if err == nil {
@@ -180,8 +200,16 @@ func probePeerIdentity(ctx context.Context, cfg *config.Config, ip string) (node
 		if resp.StatusCode != http.StatusOK {
 			return nodeIdentity{}, fmt.Errorf("identity endpoint status %d", resp.StatusCode)
 		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			return nodeIdentity{}, err
+		}
+		want := identityResponseSignature(cfg, nonce, body)
+		if !hmac.Equal([]byte(want), []byte(resp.Header.Get("X-Flux-Identity-Signature"))) {
+			return nodeIdentity{}, fmt.Errorf("unauthenticated identity response")
+		}
 		var identity nodeIdentity
-		if err := json.NewDecoder(resp.Body).Decode(&identity); err != nil {
+		if err := json.Unmarshal(body, &identity); err != nil {
 			return nodeIdentity{}, err
 		}
 		return identity, nil
@@ -240,6 +268,9 @@ func evaluateFreshPeerEvidence(cfg *config.Config, results []peerIdentityResult)
 			return false, fmt.Sprintf("peer %s unreachable or ambiguous: %v", result.IP, result.Err)
 		}
 		identity := result.Identity
+		if identity.IdentityError != "" {
+			return false, identity.IdentityError
+		}
 		if identity.AppName != cfg.AppName || identity.PatroniScope != cfg.PatroniScope {
 			return false, fmt.Sprintf("peer %s belongs to app/scope %q/%q", result.IP, identity.AppName, identity.PatroniScope)
 		}
@@ -285,6 +316,9 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 			return recoveryAuthority{}, false, fmt.Sprintf("peer %s unreachable or ambiguous: %v", result.IP, result.Err)
 		}
 		identity := result.Identity
+		if identity.IdentityError != "" {
+			return recoveryAuthority{}, false, identity.IdentityError
+		}
 		if identity.AppName != cfg.AppName || identity.PatroniScope != cfg.PatroniScope {
 			return recoveryAuthority{}, false, fmt.Sprintf("node %s belongs to app/scope %q/%q", result.IP, identity.AppName, identity.PatroniScope)
 		}
@@ -308,6 +342,9 @@ func evaluateRecoveryAuthority(cfg *config.Config, local nodeIdentity, results [
 		}
 		if identity.PostgresSystemIdentifier == "" {
 			return recoveryAuthority{}, false, fmt.Sprintf("node %s has PostgreSQL data but its system ID is unreadable", result.IP)
+		}
+		if cfg.ExpectedSystemID != "" && identity.PostgresSystemIdentifier != cfg.ExpectedSystemID {
+			return recoveryAuthority{}, false, "recovery data differs from pinned PostgreSQL identity"
 		}
 		dataNodes = append(dataNodes, result)
 	}
@@ -405,6 +442,26 @@ func selectMostAdvancedReplica(replicas []peerIdentityResult) (peerIdentityResul
 }
 
 func discoverRecoveryAuthority(cfg *config.Config) (recoveryAuthority, bool, string) {
+	id, err := expectedSystemID(cfg)
+	if err != nil {
+		return recoveryAuthority{}, false, err.Error()
+	}
+	recoveryCfg := *cfg
+	recoveryCfg.ExpectedSystemID = id
+	cfg = &recoveryCfg
+	// Retirement is an operator's assertion of fencing. Any live response from
+	// a retired address contradicts that assertion and blocks rebuilding DCS.
+	retired := unionIPs(splitCSV(cfg.RetiredClusterIPs))
+	if len(retired) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		results := probeAllPeerIdentities(ctx, cfg, retired)
+		cancel()
+		for _, result := range results {
+			if result.Err == nil {
+				return recoveryAuthority{}, false, "retired member is still reachable: " + result.IP
+			}
+		}
+	}
 	otherIPs := otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName)
 	timeout := time.Duration(cfg.BootstrapPeerProbeTimeout) * time.Second
 	if timeout < time.Second {
@@ -495,4 +552,12 @@ func confirmFreshClusterWithPeers(cfg *config.Config) bool {
 		}
 	}
 	return true
+}
+
+func identityResponseSignature(cfg *config.Config, nonce string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(cfg.PostgresReplicationPassword))
+	digest := sha256.Sum256(body)
+	_, _ = mac.Write([]byte("flux-identity-v1\x00" + cfg.AppName + "\x00" + cfg.PatroniScope + "\x00" + nonce + "\x00"))
+	_, _ = mac.Write(digest[:])
+	return hex.EncodeToString(mac.Sum(nil))
 }

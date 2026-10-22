@@ -1,9 +1,7 @@
-"""
-EC2: Node starts before Flux API registers it.
-The new node self-adds to etcd (entrypoint.sh line ~241 adds itself
-to ETCD_INITIAL_CLUSTER if not found). The existing nodes' updater sees
-it as unexpected in etcd but not in desired state. As long as mock API
-is updated before DESIRED_STATE_STABILITY_CYCLES pass, the node is kept.
+"""Late discovery registration and persistent omission of healthy members.
+
+Discovery omissions retain live members; unreachable omitted members can be
+removed only with quorum and repeated direct failures.
 """
 
 import time
@@ -17,7 +15,7 @@ def test_node_accepted_when_api_updated_in_time(cluster, mock_api):
     mock_api.set_nodes(["172.20.0.10", "172.20.0.11"])
     cluster.kill_node("postgres-node3")
 
-    # Wait past STABILITY_CYCLES (2×15s=30s) so node3 is removed from etcd
+    # Wait through stability and repeated-failure windows while node3 is stopped
     time.sleep(60)
 
     cluster.start_node("postgres-node3")
@@ -31,19 +29,12 @@ def test_node_accepted_when_api_updated_in_time(cluster, mock_api):
     assert len(members) >= 3
 
 
-def test_node_evicted_when_api_not_updated(cluster, mock_api):
-    """A node kept out of the API beyond the stability window should be evicted from etcd."""
-    # Node3 may still be joining from the previous test's restart; give it time
+def test_healthy_node_preserved_when_api_not_updated(cluster, mock_api):
+    """A persistently incomplete discovery list must not evict a live voter."""
     cluster.wait_for_healthy(expected_members=3, timeout=300)
-
+    before = cluster.etcd_cmd("postgres-node1", "member", "list")
     mock_api.set_nodes(["172.20.0.10", "172.20.0.11"])
-
-    # Wait past STABILITY_CYCLES (2×15s=30s) so node3 is evicted
-    time.sleep(60)
-
-    leader = cluster.get_leader()
-    assert leader is not None
-
-    # Re-add node3 — it needs to rejoin etcd from scratch (~120s) after eviction
-    mock_api.set_nodes(["172.20.0.10", "172.20.0.11", "172.20.0.12"])
-    cluster.wait_for_healthy(expected_members=3, timeout=300)
+    time.sleep(75)
+    after = cluster.etcd_cmd("postgres-node1", "member", "list")
+    assert before == after
+    cluster.wait_for_healthy(expected_members=3, timeout=60)

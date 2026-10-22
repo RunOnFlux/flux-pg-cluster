@@ -6,3 +6,4 @@ __pycache__/
 *.md
 !README.md
 !RECOVERY_CONTROLLER_PLAN.md
+!CLUSTER_SAFETY.md

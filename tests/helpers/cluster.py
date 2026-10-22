@@ -143,8 +143,21 @@ class ClusterManager:
                         ) as conn:
                             conn.autocommit = True
                             with conn.cursor() as cur:
-                                cur.execute("SELECT 1")
-                        return True
+                                cur.execute("SELECT pg_is_in_recovery(), current_setting('transaction_read_only')")
+                                writable = cur.fetchone() == (False, "off")
+                        if writable:
+                            # DCS membership can be cached during quorum loss.
+                            # Count only peers whose own REST endpoint confirms
+                            # a currently running PostgreSQL instance.
+                            live = set()
+                            for node_name in self._all_node_names():
+                                info = self.patroni_status(node_name)
+                                if info and info.get("state") in HEALTHY_STATES:
+                                    member_name = info.get("name") or info.get("patroni", {}).get("name")
+                                    if member_name:
+                                        live.add(member_name)
+                            if leader_name in live and len(live) >= expected_members:
+                                return True
                     except psycopg2.Error:
                         pass  # leader not yet reachable, keep waiting
             time.sleep(5)
@@ -210,6 +223,33 @@ class ClusterManager:
         network.connect(container, ipv4_address=cfg.ip)
         container.start()
         self.dynamic_nodes.add(node_name)
+
+    def retire_fenced_nodes(self, ips: list[str]) -> None:
+        """Operator action: caller has stopped/fenced every listed node."""
+        addition = "\nRETIRED_CLUSTER_IPS='" + ",".join(ips) + "'\n"
+        script = (
+            "from pathlib import Path; p=Path('/etc/cluster_env'); "
+            "p.write_text(p.read_text()+" + repr(addition) + ")"
+        )
+        for name in self._all_node_names():
+            container = self._container(name)
+            container.reload()
+            if container.status != "running":
+                continue
+            deadline = time.time() + 90
+            while time.time() < deadline:
+                ready = container.exec_run(["test", "-s", "/etc/cluster_env"])
+                if ready.exit_code == 0:
+                    stopped = container.exec_run(["supervisorctl", "stop", "updater"])
+                    if stopped.exit_code == 0 or b"not running" in stopped.output:
+                        break
+                time.sleep(1)
+            else:
+                raise TimeoutError(f"{name} did not finish agent initialization")
+            result = container.exec_run(["python3", "-c", script])
+            assert result.exit_code == 0, result.output
+            result = container.exec_run(["supervisorctl", "start", "updater"])
+            assert result.exit_code == 0, result.output
 
     def remove_fresh_node(self, node_name: str) -> None:
         cfg = self._config_for(node_name)
