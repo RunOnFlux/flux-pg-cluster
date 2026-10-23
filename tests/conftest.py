@@ -38,6 +38,8 @@ def pytest_runtest_makereport(item, call):
 
 def pytest_addoption(parser):
     parser.addoption("--skip-image-build", action="store_true", help="Reuse images already built from the current runtime source")
+    parser.addoption("--postgres-major", choices=("14", "15"), default="14", help="PostgreSQL image variant to build and exercise")
+    parser.addoption("--upgrade-from-image", help="Pre-update safety-enabled image for the optional rolling package-upgrade test")
 
 
 @pytest.fixture(scope="session")
@@ -51,8 +53,11 @@ def project_dir() -> Path:
 
 
 @pytest.fixture(scope="session")
-def compose_cmd() -> list[str]:
-    return ["docker", "compose", "-f", "docker-compose.yml", "-f", "docker-compose.test.yml"]
+def compose_cmd(request) -> list[str]:
+    command = ["docker", "compose", "-f", "docker-compose.yml", "-f", "docker-compose.test.yml"]
+    if request.config.getoption("--postgres-major") == "15":
+        command += ["-f", "docker-compose.pg15-smoke.yml"]
+    return command
 
 
 @pytest.fixture(scope="session")

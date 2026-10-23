@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -292,7 +293,7 @@ func handleProxyConn(client net.Conn, primaryIP string, cfg *config.Config, host
 		dialHost = "127.0.0.1"
 		dialPort = cfg.PostgresPort
 	}
-	target := fmt.Sprintf("%s:%d", dialHost, dialPort)
+	target := net.JoinHostPort(dialHost, strconv.Itoa(dialPort))
 	upstream, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
 		pkglog.Warnf("proxy: dial %s: %v", target, err)

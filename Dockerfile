@@ -1,9 +1,22 @@
-FROM golang:1.22 AS gobuild
+FROM golang:1.27.3-alpine AS gobuild
 WORKDIR /src
 COPY go.mod ./
-RUN go mod download 2>/dev/null || true
+RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=$(cat VERSION)" -o /out/flux-agent ./cmd/flux-agent
+
+# Build an isolated Python environment; installation tools stay out of runtime.
+FROM ubuntu:22.04 AS pythonbuild
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements-runtime.txt /tmp/requirements-runtime.txt
+RUN python3 -m venv /opt/patroni \
+    && /opt/patroni/bin/python -m pip install --no-cache-dir --upgrade pip==26.2.0 \
+    && /opt/patroni/bin/python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements-runtime.txt \
+    && /opt/patroni/bin/python -m pip check \
+    && /opt/patroni/bin/python -m pip uninstall -y pip setuptools wheel
 
 FROM ubuntu:22.04
 
@@ -12,16 +25,17 @@ ARG VERSION=dev
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV POSTGRES_MAJOR=${POSTGRES_MAJOR}
+ENV PATH="/opt/patroni/bin:${PATH}"
 
 LABEL org.opencontainers.image.version="${VERSION}" \
       runonflux.postgres.major="${POSTGRES_MAJOR}"
 
 # Install system dependencies, then PostgreSQL from PGDG so 14 and 15 share one Dockerfile.
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
     curl \
     jq \
     python3 \
-    python3-pip \
     supervisor \
     sudo \
     wget \
@@ -36,17 +50,16 @@ RUN apt-get update && apt-get install -y \
     gnutls-bin \
     && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+    && echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
-    && apt-get install -y \
+    && apt-get install -y --no-install-recommends \
         postgresql-${POSTGRES_MAJOR} \
         postgresql-client-${POSTGRES_MAJOR} \
         postgresql-${POSTGRES_MAJOR}-pgvector \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python packages
-RUN pip3 install 'patroni[etcd3]' psycopg2-binary cryptography
+COPY --from=pythonbuild /opt/patroni /opt/patroni
 
 # Create necessary directories
 RUN mkdir -p /etc/patroni /app /var/log/supervisor /var/lib/postgresql/data /var/lib/postgresql/backups /etc/ssl/cluster/{ca,etcd,postgres,patroni}
@@ -64,8 +77,9 @@ COPY diagnose.sh /app/diagnose.sh
 COPY generate-certs.sh /app/generate-certs.sh
 COPY VERSION /app/VERSION
 
-# Copy etcd 3.5 binaries (pre-downloaded to avoid build-time internet dependency)
-COPY bin/etcd bin/etcdctl /usr/local/bin/
+# Official etcd 3.5.35 Linux/amd64 binaries, verified before installation.
+COPY bin/etcd bin/etcdctl bin/SHA256SUMS /usr/local/bin/
+RUN cd /usr/local/bin && sha256sum -c SHA256SUMS && rm SHA256SUMS
 
 # Copy Go binary
 COPY --from=gobuild /out/flux-agent /app/flux-agent

@@ -504,7 +504,7 @@ func runPatroniStart() {
 	if err := os.WriteFile(patroniDCSIdentityFile, []byte(id+"\n"), 0600); err != nil {
 		pkglog.Fatalf("record Patroni control-plane identity: %v", err)
 	}
-	if err := syscall.Exec("/usr/bin/python3", []string{"python3", "-m", "patroni", "/etc/patroni/patroni.yml"}, os.Environ()); err != nil {
+	if err := syscall.Exec("/opt/patroni/bin/python3", []string{"python3", "-m", "patroni", "/etc/patroni/patroni.yml"}, os.Environ()); err != nil {
 		pkglog.Fatalf("start Patroni: %v", err)
 	}
 }

@@ -1,0 +1,63 @@
+name: Package audit
+
+on:
+  push:
+    branches: [master, development]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: pg14
+            context: .
+            postgres: "14"
+          - image: pg15
+            context: .
+            postgres: "15"
+          - image: mock-api
+            context: mock-api
+            postgres: ""
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Build fresh image
+        env:
+          IMAGE: ${{ matrix.image }}
+          BUILD_CONTEXT: ${{ matrix.context }}
+          POSTGRES_MAJOR: ${{ matrix.postgres }}
+        run: |
+          build_args=()
+          if [[ -n "$POSTGRES_MAJOR" ]]; then
+            build_args+=(--build-arg "POSTGRES_MAJOR=$POSTGRES_MAJOR")
+          fi
+          docker build --pull --no-cache "${build_args[@]}" -t "flux-pg-package-audit:$IMAGE" "$BUILD_CONTEXT"
+      - name: Install verified vulnerability scanner
+        run: |
+          curl -fL --retry 3 https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_Linux-64bit.tar.gz -o /tmp/trivy.tar.gz
+          echo 'c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0  /tmp/trivy.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+      - name: Reject fixable high and critical vulnerabilities
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: /tmp/trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 "flux-pg-package-audit:$IMAGE"

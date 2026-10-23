@@ -1,3 +1,3 @@
 module github.com/RunOnFlux/flux-pg-cluster
 
-go 1.22.2
+go 1.27.3
