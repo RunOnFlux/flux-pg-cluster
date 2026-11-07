@@ -71,7 +71,7 @@ func runEtcdStart(args []string) {
 			cancel()
 			if err == nil && len(members) > 0 {
 				anyPeerReachable = true
-				vctx, vcancel := context.WithTimeout(context.Background(), 5*time.Second)
+				vctx, vcancel := context.WithTimeout(context.Background(), 20*time.Second)
 				identityErr := validatePeerCluster(vctx, cfg, ec)
 				vcancel()
 				if identityErr != nil {
@@ -343,7 +343,7 @@ func tryJoinExistingWithLoader(cfg *config.Config, sslOpts, otherIPs []string, f
 				continue
 			}
 			anyReachable = true
-			vctx, vcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			vctx, vcancel := context.WithTimeout(context.Background(), 20*time.Second)
 			identityErr := validatePeerCluster(vctx, cfg, ec)
 			vcancel()
 			if identityErr != nil {

@@ -862,12 +862,18 @@ func markEtcdRestart() {
 // updateClusterEnv keeps /etc/cluster_env and patroni.yml in sync with the
 // desired IPs so a Patroni restart picks up the right hosts.
 func updateClusterEnv(cfg *config.Config, desiredIPs []string) error {
+	previousIdentity := cfg.ExpectedSystemID
+	// Another process may have authenticated an empty replacement since this
+	// daemon started. Never overwrite its learned identity with our old snapshot.
+	if err := restoreReplacementIdentity(cfg, replacementIdentityFile); err != nil {
+		return err
+	}
 	ips, err := discoveryIPsAt(cfg, postgresDataDir, desiredIPs)
 	if err != nil {
 		return err
 	}
 	newHosts, newPatroniHosts, newInitial := buildEtcdTopology(cfg, ips)
-	if newInitial == cfg.EtcdInitialCluster && newHosts == cfg.EtcdHosts && newPatroniHosts == cfg.PatroniEtcdHosts {
+	if newInitial == cfg.EtcdInitialCluster && newHosts == cfg.EtcdHosts && newPatroniHosts == cfg.PatroniEtcdHosts && cfg.ExpectedSystemID == previousIdentity {
 		return nil
 	}
 	cfg.EtcdHosts = newHosts

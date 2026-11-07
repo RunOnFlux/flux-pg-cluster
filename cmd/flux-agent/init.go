@@ -84,6 +84,9 @@ func runInit(args []string) {
 		pkglog.Warnf("No cluster IPs from API, using MY_IP only")
 		ips = []string{myIP}
 	}
+	if err := restoreReplacementIdentity(cfg, replacementIdentityFile); err != nil {
+		pkglog.Fatalf("replacement identity: %v", err)
+	}
 	ips, err = discoveryIPsAt(cfg, postgresDataDir, ips)
 	if err != nil {
 		pkglog.Fatalf("load durable cluster membership: %v", err)

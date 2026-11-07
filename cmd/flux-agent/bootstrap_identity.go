@@ -29,18 +29,19 @@ const clusterIdentityPath = "/cluster-identity"
 // distinguish a genuinely new deployment from an older node whose PGDATA was
 // preserved but whose database cannot currently start.
 type nodeIdentity struct {
-	AppName                  string   `json:"app_name"`
-	PatroniScope             string   `json:"patroni_scope"`
-	NodeName                 string   `json:"node_name"`
-	PGDataEmpty              bool     `json:"pgdata_empty"`
-	PostgresSystemIdentifier string   `json:"postgres_system_id,omitempty"`
-	PostgresDurableRole      string   `json:"postgres_durable_role,omitempty"`
-	PostgresControlState     string   `json:"postgres_control_state,omitempty"`
-	PostgresTimeline         uint64   `json:"postgres_timeline,omitempty"`
-	PostgresWALPosition      string   `json:"postgres_wal_position,omitempty"`
-	EtcdDataEmpty            bool     `json:"etcd_data_empty"`
-	MembershipView           []string `json:"membership_view"`
-	IdentityError            string   `json:"identity_error,omitempty"`
+	AppName                  string            `json:"app_name"`
+	PatroniScope             string            `json:"patroni_scope"`
+	NodeName                 string            `json:"node_name"`
+	PGDataEmpty              bool              `json:"pgdata_empty"`
+	PostgresSystemIdentifier string            `json:"postgres_system_id,omitempty"`
+	PostgresDurableRole      string            `json:"postgres_durable_role,omitempty"`
+	PostgresControlState     string            `json:"postgres_control_state,omitempty"`
+	PostgresTimeline         uint64            `json:"postgres_timeline,omitempty"`
+	PostgresWALPosition      string            `json:"postgres_wal_position,omitempty"`
+	EtcdDataEmpty            bool              `json:"etcd_data_empty"`
+	MembershipView           []string          `json:"membership_view"`
+	IdentityError            string            `json:"identity_error,omitempty"`
+	Join                     *replacementProof `json:"join,omitempty"`
 }
 
 type peerIdentityResult struct {
@@ -171,7 +172,13 @@ func writeIdentityResponse(w http.ResponseWriter, cfg *config.Config, r *http.Re
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	body, err := json.Marshal(localNodeIdentity(cfg))
+	identity := localNodeIdentity(cfg)
+	if r.Header.Get("X-Flux-Join-Probe") == "1" {
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		identity.Join = localReplacementProof(ctx, cfg, identity)
+		cancel()
+	}
+	body, err := json.Marshal(identity)
 	if err != nil {
 		http.Error(w, "identity unavailable", http.StatusServiceUnavailable)
 		return
@@ -181,12 +188,19 @@ func writeIdentityResponse(w http.ResponseWriter, cfg *config.Config, r *http.Re
 }
 
 func probePeerIdentity(ctx context.Context, cfg *config.Config, ip string) (nodeIdentity, error) {
+	return probePeerIdentityWithJoin(ctx, cfg, ip, false)
+}
+
+func probePeerIdentityWithJoin(ctx context.Context, cfg *config.Config, ip string, join bool) (nodeIdentity, error) {
 	url := fmt.Sprintf("http://%s:%d%s", ip, cfg.HostProxyPort, clusterIdentityPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nodeIdentity{}, err
 	}
 	req.Header.Set("X-Flux-Cluster-Probe", identityProbeToken(cfg))
+	if join {
+		req.Header.Set("X-Flux-Join-Probe", "1")
+	}
 	var nonceBytes [32]byte
 	if _, err := rand.Read(nonceBytes[:]); err != nil {
 		return nodeIdentity{}, err

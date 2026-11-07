@@ -186,7 +186,7 @@ class ClusterManager:
     def unpause_node(self, node_name: str) -> None:
         self._container(node_name).unpause()
 
-    def spawn_fresh_node(self, node_name: str, base_env_from: str = "postgres-node1") -> None:
+    def spawn_fresh_node(self, node_name: str, base_env_from: str = "postgres-node1", *, unset_env: tuple[str, ...] = (), image_ref: str | None = None) -> None:
         cfg = self._config_for(node_name)
         base_container = self._container(base_env_from)
         image = base_container.image
@@ -197,6 +197,9 @@ class ClusterManager:
             for key, value in [item.split("=", 1)]
         }
 
+        for key in unset_env:
+            env.pop(key, None)
+
         try:
             stale = self.docker_client.containers.get(cfg.container_name)
             stale.remove(force=True)
@@ -204,7 +207,7 @@ class ClusterManager:
             pass
 
         container = self.docker_client.containers.create(
-            image=image.id,
+            image=image_ref or image.id,
             name=cfg.container_name,
             hostname=cfg.container_name,
             environment=env,

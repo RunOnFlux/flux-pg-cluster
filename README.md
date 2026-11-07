@@ -50,9 +50,11 @@ extension library and is not a safe failover target for databases that use it.
 ## Quick Start
 
 New clusters require an explicit offline `flux-agent create-cluster` operation.
-Record its output as `EXPECTED_POSTGRES_SYSTEM_ID` in deployment configuration
-on every placement before starting services. Existing deployments should pin
-their verified original system ID before upgrading. See [creation and recovery](CLUSTER_SAFETY.md).
+Existing deployments with persistent PGDATA and etcd can upgrade without adding
+environment variables: nodes record their local database identity automatically,
+and empty replacements learn it from a verified healthy initialized cluster.
+`EXPECTED_POSTGRES_SYSTEM_ID` is an optional additional identity constraint.
+See [creation and recovery](CLUSTER_SAFETY.md).
 
 ### Production Deployment on Flux Network
 
@@ -127,7 +129,7 @@ Key Points:
    ]
    ```
 
-   Normal startup never creates a PostgreSQL cluster. Follow [explicit creation and migration](CLUSTER_SAFETY.md) first, then set `EXPECTED_POSTGRES_SYSTEM_ID` on every placement. Keep the identity in deployment configuration so replacements with empty volumes inherit it.
+   Normal startup never creates a PostgreSQL cluster. Follow [explicit creation and migration](CLUSTER_SAFETY.md) for new databases. Existing persistent deployments do not need a new ENV for rollout. Empty replacements verify the running cluster before cloning; an optional `EXPECTED_POSTGRES_SYSTEM_ID` adds an independent constraint. Without a surviving authenticated cluster or known identity, a replacement waits for recovery and never initializes a new database.
     
 
 2. **Connect from other Flux components**:
@@ -169,7 +171,7 @@ Key Points:
 | `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
 | `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
 | `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
-| `EXPECTED_POSTGRES_SYSTEM_ID` | PostgreSQL identity pinned in durable deployment configuration on every placement. Required for blank replacement volumes; existing volumes can derive their own identity for migration. | empty |
+| `EXPECTED_POSTGRES_SYSTEM_ID` | Optional explicit database identity constraint. Existing volumes derive their own identity; blank replacements learn and persist it from an authenticated, quorum-backed initialized cluster before cloning. Conflicting or unavailable evidence blocks learning. | empty |
 | `CLUSTER_SEED_IPS` | Optional comma-separated known peer IPs, probed in addition to discovery and persisted membership. | empty |
 | `RETIRED_CLUSTER_IPS` | Operator-confirmed fenced former peers excluded from active discovery/recovery. Never use merely because Flux omitted a node. | empty |
 | `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Deprecated compatibility setting; cannot authorize initdb. Use `flux-agent create-cluster`. | `false` |
@@ -208,7 +210,7 @@ Key Points:
 ### Split-Brain & Data-Loss Prevention Controls
 
 - **First creation is an explicit offline operator operation.** Normal startup never runs `initdb`, regardless of legacy bootstrap flags.
-- **Pin `EXPECTED_POSTGRES_SYSTEM_ID` in deployment configuration.** A volume-local history cannot identify an entirely new replacement volume.
+- **Remember the original database identity automatically.** Existing PGDATA supplies it; empty replacements require authenticated, quorum-backed agreement before learning it. `EXPECTED_POSTGRES_SYSTEM_ID` is an optional extra constraint, not a rollout prerequisite.
 - **Preserve healthy members.** Discovery omissions never remove a reachable healthy member or self; unreachable removals need quorum and repeated failures.
 - **Preserve PostgreSQL data.** A mismatched identity is quarantined. The proxy rejects unknown/foreign identities and conflicting primaries, clears unverified targets, and closes connections to invalidated targets.
 - **Recovery requires evidence from remembered active peers.** After majority loss, fence and explicitly retire unreachable former placements before authorizing control-plane recovery.
@@ -217,7 +219,7 @@ Key Points:
 ### Recovering the cluster from a backup
 
 Restore a verified physical backup to one stopped node, retain its system ID in
-`EXPECTED_POSTGRES_SYSTEM_ID` on every placement, and follow the fencing and
+the recovery records (optionally also as `EXPECTED_POSTGRES_SYSTEM_ID`), and follow the fencing and
 retirement procedure in [CLUSTER_SAFETY.md](CLUSTER_SAFETY.md). Empty replicas
 clone the recovered database. Unknown former writers block recovery until they
 are accounted for. A logical restore requires an explicitly created new cluster

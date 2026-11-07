@@ -193,13 +193,17 @@ func expectedSystemIDAt(cfg *config.Config, dataDir string) (string, error) {
 		id = local // Migration of existing volumes never trusts a peer's identity.
 	}
 	if id == "" {
-		return "", errors.New("no pinned cluster identity: set EXPECTED_POSTGRES_SYSTEM_ID, or explicitly create the first cluster")
+		return "", fmt.Errorf("%w: join a verified initialized cluster, restore existing PGDATA, or explicitly create the first cluster", errUnknownIdentity)
 	}
 	return id, nil
 }
 
 func expectedSystemID(cfg *config.Config) (string, error) {
-	return expectedSystemIDAt(cfg, postgresDataDir)
+	id, err := expectedSystemIDAt(cfg, postgresDataDir)
+	if errors.Is(err, errUnknownIdentity) {
+		return learnedSystemID(cfg, postgresDataDir, replacementIdentityFile)
+	}
+	return id, err
 }
 
 func rememberClusterAt(cfg *config.Config, dataDir string, ips []string) error {
@@ -279,6 +283,9 @@ func discoveryIPsAt(cfg *config.Config, dataDir string, discovered []string) ([]
 // membership, a familiar name, or an empty /initialize key is never authority.
 func validatePeerCluster(ctx context.Context, cfg *config.Config, ec *etcdmgr.Client) error {
 	id, err := expectedSystemID(cfg)
+	if errors.Is(err, errUnknownIdentity) {
+		id, err = learnReplacementIdentity(ctx, cfg, ec)
+	}
 	if err != nil {
 		return err
 	}
@@ -311,7 +318,7 @@ func etcdRecoveryDataEmpty(dataDir string) bool {
 	}
 	for _, entry := range entries {
 		switch entry.Name() {
-		case ".etcd3_api":
+		case ".etcd3_api", ".flux-pg-identity.json":
 			if !entry.Type().IsRegular() {
 				return false
 			}
@@ -336,7 +343,7 @@ func archiveEtcdData(dataDir string) error {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.Name() == ".flux-etcd-archives" {
+		if entry.Name() == ".flux-etcd-archives" || entry.Name() == ".flux-pg-identity.json" {
 			continue
 		}
 		if err := os.Rename(filepath.Join(dataDir, entry.Name()), filepath.Join(dest, entry.Name())); err != nil {
@@ -487,6 +494,9 @@ func runPatroniStart() {
 		pkglog.Fatalf("load cluster environment: %v", err)
 	}
 	for {
+		if err := config.LoadClusterEnv(cfg); err != nil {
+			pkglog.Fatalf("reload cluster environment: %v", err)
+		}
 		if _, err := expectedSystemID(cfg); err != nil {
 			pkglog.Errorf("Patroni startup blocked: %v", err)
 			time.Sleep(10 * time.Second)
@@ -504,7 +514,9 @@ func runPatroniStart() {
 	if err := os.WriteFile(patroniDCSIdentityFile, []byte(id+"\n"), 0600); err != nil {
 		pkglog.Fatalf("record Patroni control-plane identity: %v", err)
 	}
-	if err := syscall.Exec("/opt/patroni/bin/python3", []string{"python3", "-m", "patroni", "/etc/patroni/patroni.yml"}, os.Environ()); err != nil {
+	// CPython resolves a bare argv[0] through PATH to locate its venv. Preserve
+	// the absolute interpreter name even when a legacy deployment supplies PATH.
+	if err := syscall.Exec("/opt/patroni/bin/python3", []string{"/opt/patroni/bin/python3", "-m", "patroni", "/etc/patroni/patroni.yml"}, os.Environ()); err != nil {
 		pkglog.Fatalf("start Patroni: %v", err)
 	}
 }
