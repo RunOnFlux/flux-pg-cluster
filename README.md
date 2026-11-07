@@ -472,3 +472,9 @@ The agent is built with Go 1.27.3. Patroni runs under `/opt/patroni/bin/python3`
 The package-audit workflow checks Go vulnerabilities and builds/scans both PostgreSQL variants and the mock API on changes and weekly. Fixable high/critical image findings fail the workflow. Dependabot checks Docker, Python, and Actions dependencies weekly. Image publishing uses fresh base images and uncached package installation to pick up Ubuntu security backports, and records the source commit in the `org.opencontainers.image.revision` label.
 
 PostgreSQL minor releases are installed from PGDG. Keep major-version migrations separate from package refreshes: PostgreSQL 14 support ends November 12, 2026, and changing an image tag cannot migrate an existing data directory.
+
+## Related Projects
+
+- Flux Postgres Cluster: [https://github.com/RunOnFlux/flux-pg-cluster](https://github.com/RunOnFlux/flux-pg-cluster)
+- Flux MongoDB Cluster: [https://github.com/RunOnFlux/flux-mongodb-cluster](https://github.com/RunOnFlux/flux-mongodb-cluster)
+- Flux Redis Cluster: [https://github.com/RunOnFlux/flux-redis-cluster](https://github.com/RunOnFlux/flux-redis-cluster)
