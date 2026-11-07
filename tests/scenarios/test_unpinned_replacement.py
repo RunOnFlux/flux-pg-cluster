@@ -57,6 +57,18 @@ def test_unpinned_replacement_clones_existing_data_and_remembers_identity(cluste
     # Leave the failed node advertised to exercise a stale discovery entry.
     mock_api.set_nodes([node.ip for node in BASE_NODES.values()] + ["172.20.0.13"])
     cluster.spawn_fresh_node("test-node4", unset_env=("EXPECTED_POSTGRES_SYSTEM_ID",), image_ref="flux-pg-cluster-postgres-node1:latest")
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        learned = cluster._container("test-node4").exec_run(["cat", "/var/lib/etcd/.flux-pg-identity.json"])
+        if learned.exit_code == 0:
+            assert json.loads(learned.output)["system_id"] == original_id
+            break
+        time.sleep(2)
+    else:
+        raise AssertionError("unreachable advertised peer blocked identity learning")
+    # etcd's strict reconfiguration check waits for the failed voter to be
+    # removed before adding a learner. Model Flux's subsequent placement view.
+    mock_api.set_nodes([node.ip for name, node in BASE_NODES.items() if name != victim] + ["172.20.0.13"])
     cluster.wait_for_healthy(expected_members=3, timeout=300)
     container = cluster._container("test-node4")
     assert not any(item.startswith("EXPECTED_POSTGRES_SYSTEM_ID=") for item in container.attrs["Config"]["Env"])
@@ -70,6 +82,7 @@ def test_unpinned_replacement_clones_existing_data_and_remembers_identity(cluste
     cluster.wait_for_healthy(expected_members=3, timeout=240)
     assert cluster.get_pg_system_id("test-node4") == original_id
     assert replacement_rows(pg_password) == [("preserved",)]
+    mock_api.set_nodes([node.ip for node in BASE_NODES.values()] + ["172.20.0.13"])
     cluster.start_node(victim)
     cluster.wait_for_healthy(expected_members=4, timeout=180)
 
