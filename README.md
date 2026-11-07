@@ -425,7 +425,7 @@ pytest tests/ -v
 # Exercise the PostgreSQL 15 variant, including explicit creation and recovery
 pytest tests/ -v --postgres-major=15
 
-# Optional etcd 3.5.31 -> 3.5.35 rolling package upgrade from a safety-enabled image
+# Optional rolling security-build upgrade from a previous safety-enabled etcd 3.5 image
 pytest tests/scenarios/test_package_upgrade.py -v --upgrade-from-image=OLD_IMAGE
 
 # Individual scenarios
@@ -465,9 +465,9 @@ Check logs for each component:
 
 ### Dependency maintenance
 
-The agent is built with Go 1.27.3. Patroni runs under `/opt/patroni/bin/python3` in an isolated environment installed from `requirements-runtime.txt`, which pins all runtime Python packages and their PyPI SHA256 hashes. Refresh the lock for Ubuntu 22.04's Python 3.10, including transitive dependencies, and run `pip check`, vulnerability scans, and the cluster scenarios before publishing. Python installation tools and C development packages are excluded from the runtime image.
+The agent is built with Go 1.27.3. Patroni runs under `/opt/patroni/bin/python3` in an isolated environment installed from `requirements-runtime.txt`, which pins all runtime Python packages and their PyPI SHA256 hashes. Refresh the lock for Ubuntu 24.04's Python 3.12, including transitive dependencies, and run `pip check`, vulnerability scans, and the cluster scenarios before publishing. The newer runtime supports dnspython 2.9.0, which fixes CVE-2026-114605 and requires Python 3.11 or later. Python installation tools and C development packages are excluded from the runtime image.
 
-`bin/etcd` and `bin/etcdctl` are the official Linux/amd64 **etcd 3.5.35** executables from [the upstream release](https://github.com/etcd-io/etcd/releases/tag/v3.5.35). The release archive SHA256 is `ca9f94cdc80be66923ef571d82b128819d0f5f3aa9f01522bafd991618ee29d1`; `bin/SHA256SUMS` verifies the extracted executables during image builds. Replace both binaries and update the checksums together when upgrading; an APT refresh does not update these embedded Go dependencies.
+`bin/etcd` and `bin/etcdctl` are Linux/amd64 **etcd 3.5.35** executables rebuilt from the pinned upstream source with `golang.org/x/net` upgraded to **v0.62.0**, fixing CVE-2026-78661. See [build provenance and reproduction](bin/ETCD_BUILD.md). `bin/SHA256SUMS` verifies both executables during image builds. Rebuild both binaries and update the checksums together when upgrading; an APT refresh does not update these embedded Go dependencies.
 
 The package-audit workflow checks Go vulnerabilities and builds/scans both PostgreSQL variants and the mock API on changes and weekly. Fixable high/critical image findings fail the workflow. Dependabot checks Docker, Python, and Actions dependencies weekly. Image publishing uses fresh base images and uncached package installation to pick up Ubuntu security backports, and records the source commit in the `org.opencontainers.image.revision` label.
 

@@ -48,9 +48,11 @@ def test_rolling_upgrade_preserves_existing_volumes(cluster, project_dir, compos
     original_members = cluster.etcd_cmd("postgres-node1", "member", "list")
     cluster.exec_sql("CREATE TABLE package_upgrade_sentinel (value text)")
     cluster.exec_sql("INSERT INTO package_upgrade_sentinel VALUES ('before_upgrade')")
+    original_versions = {}
     for name in BASE_NODES:
         version = cluster._container(name).exec_run(["etcd", "--version"])
-        assert version.exit_code == 0 and b"3.5.31" in version.output
+        assert version.exit_code == 0 and b"etcd Version: 3.5." in version.output
+        original_versions[name] = version.output
 
     leader = cluster.get_leader()
     primary = next(name for name, node in BASE_NODES.items() if "node-" + node.ip.replace(".", "-") == leader)
@@ -69,5 +71,6 @@ def test_rolling_upgrade_preserves_existing_volumes(cluster, project_dir, compos
         assert container.image.id == upgrade_images[1]
         version = container.exec_run(["etcd", "--version"])
         assert version.exit_code == 0 and b"3.5.35" in version.output
+        assert version.output != original_versions[name], "upgrade must replace the etcd security build"
         python = container.exec_run(["python3", "-c", "import sys; print(sys.prefix)"])
         assert python.exit_code == 0 and python.output.strip() == b"/opt/patroni"

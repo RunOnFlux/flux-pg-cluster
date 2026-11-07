@@ -1,0 +1,28 @@
+diff --git a/etcdctl/go.mod b/etcdctl/go.mod
+index 8fa48b1..d4d750d 100644
+--- a/etcdctl/go.mod
++++ b/etcdctl/go.mod
+@@ -64 +64 @@ require (
+-	golang.org/x/net v0.61.0 // indirect
++	golang.org/x/net v0.62.0 // indirect
+diff --git a/etcdctl/go.sum b/etcdctl/go.sum
+index cf418e6..b6c9dec 100644
+--- a/etcdctl/go.sum
++++ b/etcdctl/go.sum
+@@ -351,0 +352,2 @@ golang.org/x/net v0.61.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=
++golang.org/x/net v0.62.0 h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY=
++golang.org/x/net v0.62.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=
+diff --git a/server/go.mod b/server/go.mod
+index 5dc082d..9210013 100644
+--- a/server/go.mod
++++ b/server/go.mod
+@@ -42 +42 @@ require (
+-	golang.org/x/net v0.61.0
++	golang.org/x/net v0.62.0
+diff --git a/server/go.sum b/server/go.sum
+index d23d893..b7c74ce 100644
+--- a/server/go.sum
++++ b/server/go.sum
+@@ -386,0 +387,2 @@ golang.org/x/net v0.61.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=
++golang.org/x/net v0.62.0 h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY=
++golang.org/x/net v0.62.0/go.mod h1:WgDCOTH8iwtB66T4/GfI94AHo/hhdb7Hah9NDseQfiI=

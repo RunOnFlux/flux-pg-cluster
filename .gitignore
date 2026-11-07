@@ -7,3 +7,4 @@ __pycache__/
 !README.md
 !RECOVERY_CONTROLLER_PLAN.md
 !CLUSTER_SAFETY.md
+!bin/ETCD_BUILD.md

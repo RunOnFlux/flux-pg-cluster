@@ -6,7 +6,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=$(cat VERSION)" -o /out/flux-agent ./cmd/flux-agent
 
 # Build an isolated Python environment; installation tools stay out of runtime.
-FROM ubuntu:22.04 AS pythonbuild
+FROM ubuntu:24.04 AS pythonbuild
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv ca-certificates \
@@ -18,7 +18,7 @@ RUN python3 -m venv /opt/patroni \
     && /opt/patroni/bin/python -m pip check \
     && /opt/patroni/bin/python -m pip uninstall -y pip setuptools wheel
 
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 ARG POSTGRES_MAJOR=14
 ARG VERSION=dev
@@ -77,7 +77,7 @@ COPY diagnose.sh /app/diagnose.sh
 COPY generate-certs.sh /app/generate-certs.sh
 COPY VERSION /app/VERSION
 
-# Official etcd 3.5.35 Linux/amd64 binaries, verified before installation.
+# etcd 3.5.35 with the x/net security backport; see bin/ETCD_BUILD.md.
 COPY bin/etcd bin/etcdctl bin/SHA256SUMS /usr/local/bin/
 RUN cd /usr/local/bin && sha256sum -c SHA256SUMS && rm SHA256SUMS
 
