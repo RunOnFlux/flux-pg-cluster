@@ -665,4 +665,3 @@ The redesign is complete when:
 - exactly one writable primary is asserted throughout the integration suite;
 - all tests are enforced before image publication;
 - any scenario that remains blocked reports the missing evidence and required policy, rather than looping without explanation.
-
