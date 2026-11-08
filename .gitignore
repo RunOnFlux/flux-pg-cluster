@@ -1,8 +1,38 @@
 test/
+
+# Local environment and tooling
+.env.*
+!.env.example
+!.env.sample
+.venv/
+venv/
+/.agents/
+/.codex/
+/.aws/
+
+# Python test artifacts
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local Go builds and profiles (keep the versioned etcd binaries)
+/flux-agent
+*.test
+*.prof
+/coverage.out
+
+# Diagnostic output and editor temporary files
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Existing documentation exclusions
 *.md
 !README.md
 !RECOVERY_CONTROLLER_PLAN.md
