@@ -179,9 +179,13 @@ func replacementEvidence(ctx context.Context, cfg *config.Config, ip string, ec 
 	identity, probeErr := probePeerIdentityWithJoin(ctx, cfg, ip, true)
 	if probeErr == nil {
 		if identity.AppName != cfg.AppName || identity.PatroniScope != cfg.PatroniScope ||
-			identity.NodeName != nodeNameFromIP(ip) || identity.IdentityError != "" || identity.PGDataEmpty ||
-			identity.PostgresSystemIdentifier != p.SystemID {
+			identity.NodeName != nodeNameFromIP(ip) || identity.IdentityError != "" ||
+			(identity.PostgresSystemIdentifier != "" && identity.PostgresSystemIdentifier != p.SystemID) ||
+			(identity.PGDataEmpty && identity.PostgresSystemIdentifier != "") {
 			return p, errConflictingReplacement
+		}
+		if identity.PGDataEmpty || identity.PostgresSystemIdentifier == "" {
+			return p, errors.New("peer has not restored its database yet")
 		}
 		if identity.Join != nil {
 			if *identity.Join != p {

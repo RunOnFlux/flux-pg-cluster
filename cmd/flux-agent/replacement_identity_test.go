@@ -57,7 +57,7 @@ func TestLegacyReplacementRequiresTheClusterCA(t *testing.T) {
 }
 
 func TestReplacementEvidenceAuthenticatesNonceAndRequiresQuorum(t *testing.T) {
-	for _, mode := range []string{"valid", "unsigned", "replayed", "foreign-app", "foreign-id", "foreign-dcs", "missing-proof", "no-quorum"} {
+	for _, mode := range []string{"valid", "unsigned", "replayed", "foreign-app", "foreign-id", "foreign-dcs", "missing-proof", "no-quorum", "empty-peer", "partial-peer"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := bootstrapTestConfig()
 			dir := t.TempDir()
@@ -94,6 +94,10 @@ esac
 					identity.Join.DCSID = "foreign"
 				case "missing-proof":
 					identity.Join = nil
+				case "empty-peer", "partial-peer":
+					identity.Join = nil
+					identity.PostgresSystemIdentifier = ""
+					identity.PGDataEmpty = mode == "empty-peer"
 				}
 				body, _ := json.Marshal(identity)
 				nonce := r.Header.Get("X-Flux-Probe-Nonce")
@@ -112,6 +116,9 @@ esac
 			_, err := replacementEvidence(context.Background(), cfg, "127.0.0.1", ec)
 			if (err == nil) != (mode == "valid") {
 				t.Fatalf("mode %s: %v", mode, err)
+			}
+			if (mode == "empty-peer" || mode == "partial-peer") && errors.Is(err, errConflictingReplacement) {
+				t.Fatal("a peer still cloning must not veto a healthy cluster's identity")
 			}
 		})
 	}
