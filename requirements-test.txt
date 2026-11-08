@@ -1,5 +1,5 @@
 pytest>=8.0
-pytest-timeout>=2.3
+pytest-timeout>=2.4.0
 docker>=7.0
 requests>=2.34.2
 psycopg2-binary>=2.9.13
