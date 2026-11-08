@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -86,8 +87,7 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 		return
 	}
 	if len(desiredIPs) == 0 {
-		pkglog.Warnf("no IPs from Flux API, skipping cycle")
-		return
+		pkglog.Warnf("empty Flux view: preserving committed membership")
 	}
 	desiredSignature := strings.Join(desiredIPs, ",")
 	stable, stableCount := updateStateTracker(stateTrackFile, desiredSignature, cfg.DesiredStateStabilityCycles)
@@ -97,7 +97,14 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 	// Flux API, regardless of stability or etcd health. This ensures a node
 	// that starts while the list is in flux (or while etcd is down) always has
 	// the correct ETCD_INITIAL_CLUSTER / etcd hosts on its next etcd restart.
-	updateClusterEnv(cfg, desiredIPs)
+	if err := updateClusterEnv(cfg, desiredIPs); err != nil {
+		pkglog.Errorf("membership update blocked: %v", err)
+		return
+	}
+	if err := rememberClusterAt(cfg, postgresDataDir, candidateIPs(cfg)); err != nil {
+		pkglog.Errorf("cluster identity blocked: %v", err)
+		return
+	}
 
 	// 2. Probe local etcd health (write-quorum probe)
 	// Local etcd listens on ETCD_CLIENT_PORT (container-internal port).
@@ -136,13 +143,19 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 		_ = os.WriteFile(noQuorumFile, []byte("0"), 0o644)
 		reconcilePatroniDCSConfig(cfg, ec)
 		reconcilePostgresCredentials(cfg)
+		if err := reconcilePatroniDCSEpoch(cfg, ec, patroniDCSIdentityFile, func() error {
+			pkglog.Warnf("verified control-plane identity changed — restarting Patroni to reset its cached Raft term")
+			return exec.Command("supervisorctl", "restart", "patroni").Run()
+		}); err != nil {
+			pkglog.Warnf("Patroni control-plane identity reconciliation: %v", err)
+		}
 	}
 
 	// 4. Force-new-cluster check. Never choose a survivor merely because it has
 	// PGDATA: during an ordinary quorum loss every replica has PGDATA. Automatic
 	// recovery requires authenticated agreement on either a sole data copy or,
 	// after total DCS loss, one durable primary among matching replicas.
-	if !hasQuorum && noQuorumCount >= cfg.DesiredStateStabilityCycles && stable && dirExists("/var/lib/postgresql/data/global") {
+	if cfg.DeadClusterRecovery && !hasQuorum && noQuorumCount >= cfg.DesiredStateStabilityCycles && stable && dirExists("/var/lib/postgresql/data/global") {
 		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
 		if !safe {
 			pkglog.Errorf("AUTOMATIC QUORUM RECOVERY BLOCKED: %s", reason)
@@ -164,113 +177,43 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 		return
 	}
 
-	// Split-brain detection: if local has 1 member but multiple expected, restart etcd
-	if len(members) <= 1 && len(desiredIPs) > 1 {
-		pkglog.Warnf("local etcd shows %d member(s) but %d expected — checking for split-brain", len(members), len(desiredIPs))
-		for _, ip := range desiredIPs {
-			if ip == cfg.MyIP {
-				continue
-			}
-			peerEndpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
-			pec := etcdmgr.New(peerEndpoint, sslOpts)
-			pctx, pcancel := context.WithTimeout(context.Background(), 5*time.Second)
-			peerMembers, _ := pec.MemberList(pctx)
-			pcancel()
-			if len(peerMembers) > len(members) {
-				if !etcdRestartCooldownExpired() {
-					pkglog.Infof("split-brain hint from peer %s but recent etcd restart — waiting", ip)
-					return
-				}
-				pkglog.Warnf("SPLIT-BRAIN DETECTED — peer %s has %d members vs our %d, restarting etcd",
-					ip, len(peerMembers), len(members))
-				markEtcdRestart()
-				supervisorctl("restart", "etcd")
-				return
-			}
-		}
+	// Preserve committed peers even when the initial Flux view was incomplete
+	// during migration from a release without durable membership history.
+	known := unionIPs(candidateIPs(cfg), membersIPs(members, cfg.HostEtcdClientPort))
+	if err := updateClusterEnv(cfg, known); err != nil {
+		pkglog.Errorf("remember committed membership: %v", err)
+		return
 	}
-
-	// Ghost member cleanup
-	for _, m := range members {
-		if !m.Unstarted {
-			continue
-		}
-		ghostIP := extractHostFromURL(m.PeerURLs)
-		if containsString(desiredIPs, ghostIP) {
-			pkglog.Infof("ghost member %s (id=%s) still in desired state — may be starting up", ghostIP, m.ID)
-			continue
-		}
-		pkglog.Infof("removing ghost member %s (id=%s) — not in desired state", ghostIP, m.ID)
-		gctx, gcancel := context.WithTimeout(context.Background(), 10*time.Second)
-		_ = ec.MemberRemove(gctx, m.ID)
-		gcancel()
+	if err := rememberClusterAt(cfg, postgresDataDir, candidateIPs(cfg)); err != nil {
+		pkglog.Errorf("remember committed membership: %v", err)
+		return
 	}
-
-	// Re-fetch member list after ghost cleanup
-	mctx2, mcancel2 := context.WithTimeout(context.Background(), 5*time.Second)
-	members, _ = ec.MemberList(mctx2)
-	mcancel2()
-
-	// Cluster ID mismatch self-healing (majority vote among peers)
-	if reachable, matching, mismatched := evaluatePeerVotes(cfg, sslOpts, desiredIPs); reachable > 0 {
-		pkglog.Infof("peer verification: reachable=%d matching=%d mismatched=%d", reachable, matching, mismatched)
-		if mismatched > matching {
-			if !etcdRestartCooldownExpired() {
-				pkglog.Infof("peers disagree but recent etcd restart — waiting")
-				return
-			}
-			pkglog.Warnf("majority of peers disagree — restarting local etcd for self-healing rejoin")
-			_ = wipeDir("/var/lib/etcd")
-			markEtcdRestart()
-			supervisorctl("restart", "etcd")
-			return
-		}
-	}
-
-	// Stale Patroni leader cleanup
-	checkStalePatroniLeader(cfg, ec)
-
-	// Patroni system ID mismatch self-healing.
-	// If the etcd /initialize key doesn't match the running primary's system ID,
-	// the cluster is in a split-identity state (e.g. after a dead-cluster recovery
-	// where one node briefly bootstrapped a fresh PG then yielded to an existing
-	// primary). Fix: update the etcd key to the primary's authoritative system ID
-	// so replicas with the correct data can rejoin without wiping.
-	// If this node's local PG data has a mismatched system ID (and a healthy
-	// primary exists), wipe local data so Patroni will pg_basebackup fresh.
+	// Membership size is not authority. Repair stale initialization metadata
+	// only toward the pinned identity; conflicting PGDATA is never deleted.
 	checkPatroniSystemID(cfg, ec, desiredIPs, pgWipeCooldownFile, pgWipeCooldownSecs)
 
-	// 6. Reconcile membership
-	// Members not in the Flux API are removed:
-	//   - Immediately if they are also unreachable (departed node — no reason to wait)
-	//   - After state stability if they are still reachable (safety gate against transient API errors)
-	currentMembers := membersIPs(members, cfg.HostEtcdClientPort)
-	pkglog.Infof("current etcd members: %v", currentMembers)
-
-	for _, current := range currentMembers {
-		if containsString(desiredIPs, current) {
+	// Remove absent members only with write quorum and repeated direct failures.
+	// A stable API omission never overrides a reachable member, or removes self.
+	for _, m := range members {
+		ip := extractHostFromURL(m.PeerURLs)
+		track := stateTrackFile + ".absent-" + strings.ReplaceAll(ip, ":", "_")
+		if ip == "" || ip == cfg.MyIP || m.Name == cfg.MyName || containsString(desiredIPs, ip) || !stable || !hasQuorum {
+			_ = os.Remove(track)
 			continue
 		}
-		reachable := isPeerReachable(cfg, sslOpts, current)
-		if !stable && reachable {
-			pkglog.Infof("member %s not in desired state but still reachable and state not yet stable — skipping", current)
+		if clusterMemberReachable(cfg, ip) {
+			_ = os.Remove(track)
 			continue
 		}
-		if !reachable {
-			pkglog.Infof("member %s not in desired state AND unreachable — removing immediately", current)
-		} else {
-			pkglog.Infof("member %s NOT in desired state — removing (stable)", current)
+		failed, _ := updateStateTracker(track, ip, cfg.DesiredStateStabilityCycles)
+		if !failed {
+			continue
 		}
-		m := etcdmgr.FindByClientIP(members, fmt.Sprintf("%s:%d", current, cfg.HostEtcdClientPort))
-		if m != nil && m.ID != "" {
-			rctx, rcancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := ec.MemberRemove(rctx, m.ID); err != nil {
-				pkglog.Warnf("remove %s (%s): %v", current, m.ID, err)
-			} else {
-				pkglog.Infof("removed %s (id=%s)", current, m.ID)
-			}
-			rcancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := ec.MemberRemove(ctx, m.ID); err != nil {
+			pkglog.Warnf("remove failed member %s: %v", ip, err)
 		}
+		cancel()
 	}
 
 	// 7. Promote any learner members that are in the desired set and have caught up.
@@ -284,7 +227,7 @@ func runReconcile(cfg *config.Config, fc *fluxapi.Client, sslOpts []string,
 			continue
 		}
 		learnerIP := extractHostFromURL(m.ClientURLs)
-		if learnerIP == "" || !containsString(desiredIPs, learnerIP) {
+		if learnerIP == "" || !containsString(candidateIPs(cfg), learnerIP) {
 			pkglog.Infof("skipping learner promotion for %s: ip=%q not in desired set", m.Name, learnerIP)
 			continue
 		}
@@ -403,6 +346,11 @@ func shouldFNFNow(cooldownFile string, cooldownSecs int) bool {
 }
 
 func triggerForceNewCluster(cfg *config.Config, sslOpts []string, systemID, flagFile, cooldownFile, noQuorumFile string) {
+	if !cfg.DeadClusterRecovery || anyDCSQuorum(cfg) {
+		pkglog.Infof("control-plane rebuild cancelled: recovery disabled or quorum has returned")
+		return
+	}
+
 	pkglog.Section("QUORUM RECOVERY: TRIGGERING FORCE-NEW-CLUSTER")
 	_ = os.WriteFile(flagFile, []byte("1"), 0o644)
 	_ = os.WriteFile(cooldownFile, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644)
@@ -450,6 +398,7 @@ func triggerForceNewCluster(cfg *config.Config, sslOpts []string, systemID, flag
 }
 
 var requiredPatroniHBA = []string{
+	"local all postgres peer",
 	"hostssl replication replicator 0.0.0.0/0 cert clientcert=verify-full",
 	"hostssl all all 0.0.0.0/0 md5",
 	"host replication replicator 0.0.0.0/0 md5",
@@ -481,6 +430,14 @@ func mergePatroniRecoveryConfig(raw string, cfg *config.Config) (string, bool, e
 	setDefault("loop_wait", cfg.PatroniLoopWait)
 	setDefault("retry_timeout", cfg.PatroniRetryTimeout)
 	setDefault("maximum_lag_on_failover", cfg.PatroniMaxLag)
+	// A preinitialized seed may reach DCS before Patroni's bootstrap callback.
+	// Preserve configured durability/HA policy even when we create /config first.
+	setDefault("synchronous_mode", cfg.PatroniSynchronousMode)
+	setDefault("synchronous_mode_strict", cfg.PatroniSynchronousModeStrict)
+	setDefault("synchronous_node_count", cfg.PatroniSynchronousNodeCount)
+	setDefault("failsafe_mode", cfg.PatroniFailsafeMode)
+	setDefault("primary_start_timeout", cfg.PatroniMasterStartTimeout)
+	setDefault("primary_stop_timeout", cfg.PatroniMasterStopTimeout)
 
 	postgresql, ok := root["postgresql"].(map[string]interface{})
 	if !ok {
@@ -488,6 +445,9 @@ func mergePatroniRecoveryConfig(raw string, cfg *config.Config) (string, bool, e
 		root["postgresql"] = postgresql
 	}
 	postgresql["use_pg_rewind"] = true
+	if _, ok := postgresql["use_slots"]; !ok {
+		postgresql["use_slots"] = cfg.PatroniUseSlots
+	}
 	existingHBA := make([]string, 0)
 	switch values := postgresql["pg_hba"].(type) {
 	case []interface{}:
@@ -587,193 +547,80 @@ func reconcilePostgresCredentials(cfg *config.Config) {
 		pkglog.Errorf("failed to reconcile PostgreSQL cluster roles after restore: %v (output=%s)", err, strings.TrimSpace(string(out)))
 		return
 	}
+	creationMarker := filepath.Join(postgresDataDir, ".flux-agent", "first-creation")
+	if fileExists(creationMarker) {
+		out, err := localPSQL(cfg.PostgresPort, initialApplicationSQL(cfg))
+		if err != nil {
+			pkglog.Errorf("first-creation application setup failed: %v (output=%s)", err, strings.TrimSpace(string(out)))
+			return
+		}
+		if err := os.Remove(creationMarker); err != nil {
+			pkglog.Errorf("record first-creation application setup: %v", err)
+			return
+		}
+	}
 	if err := os.WriteFile(postgresCredentialsMarker, []byte("ok\n"), 0o600); err != nil {
 		pkglog.Warnf("write PostgreSQL credential reconciliation marker: %v", err)
 	}
 	pkglog.Infof("reconciled postgres and replicator roles from configured credentials")
 }
 
-// isPeerReachable returns true if the etcd client endpoint on ip responds within 3 seconds.
-func isPeerReachable(cfg *config.Config, sslOpts []string, ip string) bool {
-	endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
-	ec := etcdmgr.New(endpoint, sslOpts)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	_, err := ec.MemberList(ctx)
-	return err == nil
+func initialApplicationSQL(cfg *config.Config) string {
+	sql := fmt.Sprintf(`
+DO $do$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'admin') THEN
+    CREATE ROLE admin WITH LOGIN CREATEROLE CREATEDB;
+  END IF;
+END
+$do$;
+ALTER ROLE admin WITH PASSWORD %s;
+`, sqlLiteral(cfg.PostgresSuperuserPassword))
+	if cfg.PostgresDB != "" && cfg.PostgresDB != "postgres" {
+		sql += fmt.Sprintf("SELECT format('CREATE DATABASE %%I OWNER admin', %s) WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname=%s) \\gexec\n", sqlLiteral(cfg.PostgresDB), sqlLiteral(cfg.PostgresDB))
+	}
+	return sql
 }
 
-func evaluatePeerVotes(cfg *config.Config, sslOpts, desiredIPs []string) (reachable, matching, mismatched int) {
-	for _, ip := range desiredIPs {
-		if ip == cfg.MyIP {
-			continue
-		}
-		endpoint := fmt.Sprintf("%s://%s:%d", cfg.EtcdProtocol(), ip, cfg.HostEtcdClientPort)
-		ec := etcdmgr.New(endpoint, sslOpts)
+// checkPatroniSystemID repairs only stale DCS metadata toward the pinned identity.
+func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, _ []string, _ string, _ int) {
+	expected, err := expectedSystemID(cfg)
+	if err != nil {
+		pkglog.Errorf("system-ID reconciliation blocked: %v", err)
+		return
+	}
+	key := fmt.Sprintf("/patroni/%s/initialize", cfg.PatroniScope)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	old, err := ec.Get(ctx, key)
+	cancel()
+	if err != nil || old == "" || old == expected {
+		return
+	}
+	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
+	primaries := map[string]string{}
+	for _, ip := range candidateIPs(cfg) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		peerMembers, err := ec.MemberList(ctx)
+		host, port := patroniProbeTarget(cfg, ip)
+		client := pc
+		if port == cfg.PatroniAPIPort {
+			client = patroni.New(cfg.SSLEnabled, port)
+		}
+		info, err := client.GetInfo(ctx, host)
+		if err == nil && info.State == "running" && (info.Role == "primary" || info.Role == "master") {
+			primaries[ip] = info.DatabaseSystemIdentifier
+		}
 		cancel()
-		if err != nil {
-			continue
-		}
-		reachable++
-		if etcdmgr.FindByName(peerMembers, cfg.MyName) != nil {
-			matching++
-		} else {
-			mismatched++
-		}
 	}
-	return
-}
-
-func checkStalePatroniLeader(cfg *config.Config, ec *etcdmgr.Client) {
-	if !dirExists("/var/lib/postgresql/data/global") {
+	if selectPinnedPrimary(expected, primaries) == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	leader, err := ec.Get(ctx, fmt.Sprintf("/patroni/%s/leader", cfg.PatroniScope))
-	cancel()
-	if err != nil || leader == "" || leader == cfg.MyName {
-		return
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ec.CompareAndSwap(ctx, key, old, expected); err != nil {
+		pkglog.Warnf("repair pinned initialize identity: %v", err)
 	}
-	leaderIP := strings.ReplaceAll(strings.TrimPrefix(leader, "node-"), "-", ".")
-	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
-	hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer hcancel()
-	if pc.IsAlive(hctx, leaderIP) {
-		return
-	}
-	pkglog.Warnf("Patroni leader %s unreachable at %s — clearing stale leader key", leader, leaderIP)
-	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
-	_ = ec.RM(rctx, fmt.Sprintf("/patroni/%s/leader", cfg.PatroniScope))
-	rcancel()
-}
-
-// checkPatroniSystemID detects and heals two related split-identity scenarios:
-//
-//  1. The etcd /initialize key doesn't match the running primary's system ID
-//     (e.g. after a dead-cluster recovery where one node briefly bootstrapped a
-//     fresh PG, set /initialize, then yielded to a surviving primary with an
-//     older system ID). Action: update /initialize to the primary's system ID so
-//     replicas with matching data can rejoin without wiping.
-//
-//  2. This node's local PG data has a system ID that doesn't match /initialize
-//     AND there is at least one healthy cluster member (primary or replica) that
-//     confirms the correct system ID. The data is from the wrong cluster epoch.
-//     Action: wipe local PG data and restart Patroni so it pg_basebackup.
-//
-// Note: a running replica is sufficient evidence for case 2. We do not require
-// the primary to be reachable — waiting for it would leave crash-looping nodes
-// unhealed whenever the primary is on a different network segment.
-func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, desiredIPs []string, wipeCooldownFile string, wipeCooldownSecs int) {
-	initKey := fmt.Sprintf("/patroni/%s/initialize", cfg.PatroniScope)
-
-	// Read the etcd cluster-initialize system identifier.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	etcdSysID, err := ec.Get(ctx, initKey)
-	cancel()
-	if err != nil || etcdSysID == "" {
-		// Not yet initialised — nothing to heal.
-		return
-	}
-
-	// Poll all desired peers for Patroni info. Track the primary separately
-	// (needed for Case 1) and any member whose system ID matches /initialize
-	// (sufficient for Case 2).
-	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
-	primarySysID := ""
-	primaryIP := ""
-	anyMatchingMember := false // any peer running the cluster with etcdSysID
-
-	for _, ip := range desiredIPs {
-		ictx, icancel := context.WithTimeout(context.Background(), 5*time.Second)
-		info, infoErr := pc.GetInfo(ictx, ip)
-		icancel()
-		if infoErr != nil || info == nil || info.DatabaseSystemIdentifier == "" {
-			continue
-		}
-		// Accept both "primary" (Patroni 3+) and "master" (older Patroni).
-		if info.Role == "primary" || info.Role == "master" {
-			primarySysID = info.DatabaseSystemIdentifier
-			primaryIP = ip
-		}
-		if info.DatabaseSystemIdentifier == etcdSysID {
-			anyMatchingMember = true
-		}
-	}
-
-	// Case 1: etcd /initialize key is stale (doesn't match the running primary).
-	// Only update when we have confirmed the primary and at least one other
-	// member also carries the primary's system ID (majority consensus).
-	if primarySysID != "" && primarySysID != etcdSysID && anyMatchingMember {
-		// anyMatchingMember means some peer already agreed with etcdSysID, so
-		// the primary is the outlier — don't override yet.
-		// If NO member matches etcdSysID, the initialize key is genuinely stale.
-	} else if primarySysID != "" && primarySysID != etcdSysID && !anyMatchingMember {
-		pkglog.Warnf("system ID mismatch: etcd /initialize=%s but primary %s reports %s and no member confirms /initialize — updating initialize key",
-			etcdSysID, primaryIP, primarySysID)
-		uctx, ucancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = ec.Set(uctx, initKey, primarySysID)
-		ucancel()
-		// Treat the updated value as authoritative going forward.
-		etcdSysID = primarySysID
-		anyMatchingMember = true
-	}
-
-	// Case 2: local PG data has a system ID from a different cluster epoch.
-	//
-	// This deletes the local PostgreSQL data directory, so getting the
-	// "authoritative" system ID wrong destroys real data. A freshly-bootstrapped
-	// EMPTY cluster publishes its own system ID to /initialize; if we then trust
-	// a single re-cloned replica as confirmation, we will delete the *real* data
-	// on every surviving node. That is exactly how a production cluster was
-	// emptied. Two guards prevent a recurrence:
-	//
-	//   1. Require the live PRIMARY (not merely "any member") to confirm the
-	//      authoritative system ID before we treat the local data as stale.
-	//      A replica that was itself re-cloned from a bad epoch is not enough.
-	//   2. Never auto-wipe unless ALLOW_PG_DATA_WIPE is explicitly enabled. By
-	//      default we log a loud, actionable error and leave the data intact so
-	//      a human can confirm the authoritative copy before anything is deleted.
-	primaryConfirmsSysID := primaryIP != "" && primarySysID != "" && primarySysID == etcdSysID
-	if !primaryConfirmsSysID {
-		return
-	}
-	if cfg.MyIP == primaryIP {
-		return
-	}
-	if !dirExists("/var/lib/postgresql/data/global") {
-		return
-	}
-	localSysID, localErr := readLocalPGSystemID()
-	if localErr != nil {
-		pkglog.Infof("could not read local PG system ID: %v", localErr)
-		return
-	}
-	if localSysID == etcdSysID {
-		return
-	}
-	if !cfg.AllowPGDataWipe {
-		pkglog.Errorf("DATA SAFETY: local PG system ID %s != cluster system ID %s (confirmed by primary %s), "+
-			"but ALLOW_PG_DATA_WIPE is disabled — refusing to delete /var/lib/postgresql/data. "+
-			"If this node genuinely holds stale data, verify the authoritative copy first, then either remove "+
-			"this node's data dir manually or set ALLOW_PG_DATA_WIPE=true so Patroni can re-clone it.",
-			localSysID, etcdSysID, primaryIP)
-		return
-	}
-	pkglog.Warnf("local PG system ID %s != cluster system ID %s — wiping data for clean pg_basebackup (ALLOW_PG_DATA_WIPE=true)",
-		localSysID, etcdSysID)
-	if !shouldFNFNow(wipeCooldownFile, wipeCooldownSecs) {
-		pkglog.Infof("PG wipe cooldown active — skipping wipe this cycle")
-		return
-	}
-	_ = os.WriteFile(wipeCooldownFile, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644)
-	supervisorctl("stop", "patroni")
-	if err := wipeDir("/var/lib/postgresql/data"); err != nil {
-		pkglog.Errorf("failed to wipe PG data: %v", err)
-		return
-	}
-	supervisorctl("start", "patroni")
+	// Conflicting PGDATA is always preserved. Neither a peer's role nor the
+	// legacy ALLOW_PG_DATA_WIPE flag authorizes deleting a different database.
 }
 
 type postgresControlData struct {
@@ -922,7 +769,7 @@ func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, des
 
 	// Check peer evidence to decide action
 	reachable, knowUs, dontKnowUs := 0, 0, 0
-	for _, ip := range desiredIPs {
+	for _, ip := range candidateIPs(cfg) {
 		if ip == cfg.MyIP {
 			continue
 		}
@@ -959,21 +806,12 @@ func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, des
 			}
 			return
 		} else {
-			// Every non-authority node drops only its empty/obsolete local etcd
-			// state so etcd-start can register it as a learner with the authority.
-			// PGDATA is never removed here; Patroni will retain or rewind replicas.
 			if !etcdRestartCooldownExpired() {
-				pkglog.Infof("waiting for recent etcd restart to settle before joining authority %s", authority.NodeName)
 				return
 			}
-			pkglog.Warnf("PostgreSQL recovery authority is %s — resetting local etcd to join it as a learner", authority.NodeName)
-			if err := wipeDir("/var/lib/etcd"); err != nil {
-				pkglog.Errorf("failed to reset local etcd follower state: %v", err)
-				return
-			}
+			pkglog.Infof("waiting for recovery authority %s; restarting etcd for identity-checked rejoin", authority.NodeName)
 			markEtcdRestart()
 			supervisorctl("restart", "etcd")
-			_ = os.WriteFile(unavailFile, []byte("0"), 0o644)
 			return
 		}
 	}
@@ -981,14 +819,11 @@ func handleEtcdUnreachable(cfg *config.Config, sslOpts, desiredIPs []string, des
 	if count >= cfg.EtcdUnavailableRecoveryCycles && reachable > 0 {
 		if dontKnowUs > knowUs {
 			if !etcdRestartCooldownExpired() {
-				pkglog.Infof("peers don't know us but recent etcd restart — skipping wipe")
 				return
 			}
-			pkglog.Warnf("majority of peers don't know us — wiping local etcd and rejoining")
-			_ = wipeDir("/var/lib/etcd")
+			pkglog.Warnf("peer membership differs; restarting for identity-checked rejoin without deleting live etcd data")
 			markEtcdRestart()
 			supervisorctl("restart", "etcd")
-			_ = os.WriteFile(unavailFile, []byte("0"), 0o644)
 			return
 		}
 		if knowUs > 0 {
@@ -1026,20 +861,29 @@ func markEtcdRestart() {
 
 // updateClusterEnv keeps /etc/cluster_env and patroni.yml in sync with the
 // desired IPs so a Patroni restart picks up the right hosts.
-func updateClusterEnv(cfg *config.Config, desiredIPs []string) {
-	newHosts, newPatroniHosts, newInitial := buildEtcdTopology(cfg, desiredIPs)
-
-	if newInitial == cfg.EtcdInitialCluster && newHosts == cfg.EtcdHosts && newPatroniHosts == cfg.PatroniEtcdHosts {
-		return
+func updateClusterEnv(cfg *config.Config, desiredIPs []string) error {
+	previousIdentity := cfg.ExpectedSystemID
+	// Another process may have authenticated an empty replacement since this
+	// daemon started. Never overwrite its learned identity with our old snapshot.
+	if err := restoreReplacementIdentity(cfg, replacementIdentityFile); err != nil {
+		return err
+	}
+	ips, err := discoveryIPsAt(cfg, postgresDataDir, desiredIPs)
+	if err != nil {
+		return err
+	}
+	newHosts, newPatroniHosts, newInitial := buildEtcdTopology(cfg, ips)
+	if newInitial == cfg.EtcdInitialCluster && newHosts == cfg.EtcdHosts && newPatroniHosts == cfg.PatroniEtcdHosts && cfg.ExpectedSystemID == previousIdentity {
+		return nil
 	}
 	cfg.EtcdHosts = newHosts
 	cfg.PatroniEtcdHosts = newPatroniHosts
 	cfg.EtcdInitialCluster = newInitial
 	if err := cfg.WriteClusterEnv(); err != nil {
-		pkglog.Warnf("write cluster env: %v", err)
+		return err
 	}
-	// Update patroni.yml etcd hosts line
 	updatePatroniYAMLHosts("/etc/patroni/patroni.yml", newPatroniHosts)
+	return nil
 }
 
 func updatePatroniYAMLHosts(path, hosts string) {

@@ -1,22 +1,11 @@
-"""
-EC3: 2 of 3 nodes go down simultaneously and fresh replacements spawn.
+"""Majority replacement preserves data after explicit operator fencing.
 
-Critical scenario: surviving node A has only 1/3 etcd members → NO QUORUM.
-New nodes B' and C' try etcdctl member add → FAILS (needs quorum).
-A's updater detects no-quorum for DESIRED_STATE_STABILITY_CYCLES consecutive
-cycles with stale members pending → writes /tmp/force-new-cluster flag,
-restarts etcd with --force-new-cluster.
-New nodes can then join the single-member cluster.
-
-Timing with test overrides (UPDATE_INTERVAL=15s, STABILITY_CYCLES=2):
-- No-quorum detected: ~15s after kill
-- force-new-cluster trigger: ~30s after kill (2 cycles)
-- etcd restart: ~5s
-- New nodes join + Patroni elects leader: ~90s
-- Total: ~150s, test timeout: 300s
+Loss of a discovery entry cannot prove that an old writer stopped. The tests
+stop both old nodes and explicitly retire their IPs before rebuilding DCS.
 """
 
 import subprocess
+from tests.helpers.lifecycle import start_new_cluster
 
 import docker as docker_sdk
 import pytest
@@ -28,7 +17,7 @@ from tests.helpers.mock_api import MockApiClient
 @pytest.fixture(scope="function")
 def running_cluster(project_dir, compose_cmd, built_image):
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
-    subprocess.run(compose_cmd + ["up", "-d"], cwd=project_dir, check=True)
+    start_new_cluster(project_dir, compose_cmd)
     yield
     subprocess.run(compose_cmd + ["down", "-v", "--remove-orphans"], cwd=project_dir, check=False)
 
@@ -49,8 +38,9 @@ def mock_api(cluster):
 
 
 def test_majority_replacement_recovery(cluster, mock_api):
-    """Replacing two dead nodes should recover the cluster via force-new-cluster."""
+    """After operator-confirmed fencing, replacements recover the preserved database."""
     cluster.wait_for_healthy(expected_members=3, timeout=120)
+    original_id = cluster.get_pg_system_id("postgres-node1")
     original_leader = cluster.get_leader()
     assert original_leader is not None
 
@@ -61,9 +51,11 @@ def test_majority_replacement_recovery(cluster, mock_api):
 
     cluster.spawn_fresh_node("test-node4")
     cluster.spawn_fresh_node("test-node5")
+    cluster.retire_fenced_nodes(["172.20.0.11", "172.20.0.12"])
 
     cluster.wait_for_healthy(expected_members=3, timeout=300)
 
+    assert cluster.get_pg_system_id("postgres-node1") == original_id
     new_leader = cluster.get_leader()
     assert new_leader is not None
 
@@ -86,6 +78,7 @@ def test_data_survives_majority_replacement(cluster, mock_api):
     mock_api.set_nodes(["172.20.0.10", "172.20.0.13", "172.20.0.14"])
     cluster.spawn_fresh_node("test-node4")
     cluster.spawn_fresh_node("test-node5")
+    cluster.retire_fenced_nodes(["172.20.0.11", "172.20.0.12"])
 
     cluster.wait_for_healthy(expected_members=3, timeout=300)
 

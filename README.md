@@ -1,5 +1,5 @@
 # Flux PostgreSQL Cluster
-![Version](https://img.shields.io/badge/version-1.4.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.1-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
 ![Docker](https://img.shields.io/badge/Docker-required-blue.svg)
@@ -23,7 +23,38 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 
 Use `latest` / `dev` for existing PostgreSQL 14 clusters. Use `pg15` / `dev-pg15` only for **new** clusters with fresh volumes — do not swap tags on existing PG 14 data directories.
 
+### pgvector
+
+The PostgreSQL 14 and 15 images include the
+[pgvector](https://github.com/pgvector/pgvector) server extension. It is
+installed on every HA node but is not enabled automatically, so upgrading an
+existing cluster does not modify any database. After every node has been
+redeployed with a pgvector-capable image, enable it once in each database that
+needs vector support:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Run the command through port 5433 so it reaches the current primary. Physical
+WAL replication carries the extension catalog, vector tables, data, and indexes
+to the replicas; the package installed in every image supplies the server-side
+library after failover. Each node continues to use its own persistent
+`/var/lib/postgresql/data` volume—do not share or filesystem-sync `PGDATA`
+between nodes.
+
+For an existing cluster, do not enable `vector` until all potential primary
+nodes have been upgraded. A node running an older image does not have the
+extension library and is not a safe failover target for databases that use it.
+
 ## Quick Start
+
+New clusters require an explicit offline `flux-agent create-cluster` operation.
+Existing deployments with persistent PGDATA and etcd can upgrade without adding
+environment variables: nodes record their local database identity automatically,
+and empty replacements learn it from a verified healthy initialized cluster.
+`EXPECTED_POSTGRES_SYSTEM_ID` is an optional additional identity constraint.
+See [creation and recovery](CLUSTER_SAFETY.md).
 
 ### Production Deployment on Flux Network
 
@@ -56,7 +87,7 @@ Use `latest` / `dev` for existing PostgreSQL 14 clusters. Use `pg15` / `dev-pg15
 Key Points:
 • Each application connects to its local proxy on port 5433
 • The proxy polls Patroni to discover the current primary and forwards all connections there
-• After a failover the proxy automatically reroutes new connections to the new primary
+• After a failover the proxy verifies the new primary and closes connections to invalidated targets
 • PostgreSQL instances replicate data across nodes via public internet
 • Only PRIMARY accepts writes; SECONDARY nodes are read-only
 ```
@@ -93,12 +124,12 @@ Key Points:
       "SSL_ENABLED=true",
       "SSL_PASSPHRASE=your-ssl-passphrase",
       "ALLOW_NEW_CLUSTER_BOOTSTRAP=false",
-      "AUTO_BOOTSTRAP_IF_FRESH=true",
+      "AUTO_BOOTSTRAP_IF_FRESH=false",
       "ALLOW_PG_DATA_WIPE=false"
    ]
    ```
 
-   These are the recommended bootstrap safety defaults for an automatic multi-node deployment. `AUTO_BOOTSTRAP_IF_FRESH=true` forms the initial cluster only after every expected node repeatedly confirms that it is empty; the other two settings prevent an unreachable peer or system-ID mismatch from authorizing a new epoch or deleting PostgreSQL data.
+   Normal startup never creates a PostgreSQL cluster. Follow [explicit creation and migration](CLUSTER_SAFETY.md) for new databases. Existing persistent deployments do not need a new ENV for rollout. Empty replacements verify the running cluster before cloning; an optional `EXPECTED_POSTGRES_SYSTEM_ID` adds an independent constraint. Without a surviving authenticated cluster or known identity, a replacement waits for recovery and never initializes a new database.
     
 
 2. **Connect from other Flux components**:
@@ -140,15 +171,18 @@ Key Points:
 | `SSL_ENABLED` | Enable SSL/TLS encryption for all services | `false` |
 | `SSL_PASSPHRASE` | Deterministic passphrase for certificate generation | Required if SSL_ENABLED=true |
 | `SSL_CERT_VALIDITY_DAYS` | Certificate validity period in days | `3650` |
-| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Explicitly allow creating a brand-new etcd cluster when no peers are reachable, including an otherwise ambiguous single-node deployment. Keep `false` during normal operations; set `true` only for a deliberate first-time cluster creation, then unset it. | `false` |
-| `ALLOW_ANY_NODE_BOOTSTRAP` | If `true`, bypass deterministic bootstrap-candidate restriction. Keep `false` for safety. | `false` |
-| `AUTO_BOOTSTRAP_IF_FRESH` | If `true`, the deterministic candidate may create the first cluster only after **every expected peer is reachable** and repeatedly reports empty PostgreSQL and etcd state with the identical app, Patroni scope, and membership view. Unreachable is never treated as empty. Single-node automatic bootstrap is deliberately blocked as ambiguous; use `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` for an intentional single-node first boot. Requires `PROXY_ENABLED=true` on every peer. | `true` |
-| `DEAD_CLUSTER_RECOVERY` | If `true`, the agent may rebuild the **etcd/Patroni control plane** after every expected node repeatedly agrees on a safe PostgreSQL authority. A sole restored PGDATA copy is authoritative. After total DCS loss with multiple copies, every node must report empty etcd and all PostgreSQL system IDs must match. A unique durable former primary is preferred; if it is gone, the most advanced replica on the common timeline is selected by durable WAL position, with deterministic node-name ordering for ties. Unreachable peers, conflicting views, mismatched IDs, multiple primaries, divergent timelines, or unreadable WAL progress block recovery. | `true` |
-| `ALLOW_PG_DATA_WIPE` | If `true`, the updater may delete `/var/lib/postgresql/data` when this node's PostgreSQL system ID differs from the cluster's authoritative system ID (so Patroni can re-clone via `pg_basebackup`). **Defaults to `false`**: instead of deleting data, the updater logs a loud, actionable error and leaves the data intact for a human to verify. When enabled, the wipe still requires the **live primary** to confirm the authoritative system ID. Only enable temporarily, on a node you have confirmed holds stale data. | `false` |
+| `EXPECTED_POSTGRES_SYSTEM_ID` | Optional explicit database identity constraint. Existing volumes derive their own identity; blank replacements learn and persist it from an authenticated, quorum-backed initialized cluster before cloning. Conflicting or unavailable evidence blocks learning. | empty |
+| `CLUSTER_SEED_IPS` | Optional comma-separated known peer IPs, probed in addition to discovery and persisted membership. | empty |
+| `RETIRED_CLUSTER_IPS` | Operator-confirmed fenced former peers excluded from active discovery/recovery. Never use merely because Flux omitted a node. | empty |
+| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Deprecated compatibility setting; cannot authorize initdb. Use `flux-agent create-cluster`. | `false` |
+| `ALLOW_ANY_NODE_BOOTSTRAP` | Deprecated compatibility setting; cannot authorize initdb. | `false` |
+| `AUTO_BOOTSTRAP_IF_FRESH` | Deprecated compatibility setting; empty-peer agreement never authorizes initdb. | `false` |
+| `DEAD_CLUSTER_RECOVERY` | Allow rebuilding DCS around pinned, preserved PGDATA after repeated unanimous evidence from all remembered active peers. Unknown/unreachable former peers block recovery until the operator fences and retires them. Does not authorize initdb. | `true` |
+| `ALLOW_PG_DATA_WIPE` | Deprecated compatibility setting; mismatched PGDATA is preserved even when this is true. Operator-verified replacement is manual. | `false` |
 | `ETCD_JOIN_MAX_RETRIES` | Peer-join attempts made by the deterministic candidate before evaluating bootstrap. Non-candidates wait at least 60 attempts and never bootstrap themselves. | `12` |
 | `ETCD_JOIN_RETRY_DELAY_SECONDS` | Delay between peer-join retries | `10` |
-| `BOOTSTRAP_PEER_CONFIRM_CYCLES` | Consecutive unanimous peer-empty confirmations required before automatic first bootstrap | `3` |
-| `BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS` | Delay between fresh-state confirmation cycles | `10` |
+| `BOOTSTRAP_PEER_CONFIRM_CYCLES` | Consecutive unanimous confirmations required before control-plane recovery | `3` |
+| `BOOTSTRAP_PEER_PROBE_INTERVAL_SECONDS` | Delay between recovery confirmation cycles | `10` |
 | `BOOTSTRAP_PEER_PROBE_TIMEOUT_SECONDS` | Timeout for each peer identity probe | `5` |
 | `UPDATE_INTERVAL_SECONDS` | Update daemon reconciliation interval | `60` |
 | `DESIRED_STATE_STABILITY_CYCLES` | API desired-state cycles required before membership removal/rewrite | `3` |
@@ -175,35 +209,21 @@ Key Points:
 
 ### Split-Brain & Data-Loss Prevention Controls
 
-- **Recommended automatic multi-node settings:** `ALLOW_NEW_CLUSTER_BOOTSTRAP=false`, `AUTO_BOOTSTRAP_IF_FRESH=true`, and `ALLOW_PG_DATA_WIPE=false`.
-- **The updater never deletes PostgreSQL data by default.** `ALLOW_PG_DATA_WIPE` defaults to `false`. When a system-ID mismatch is detected, the updater requires the **live primary** (not just any re-cloned replica) to confirm the authoritative system ID, and even then only logs a loud error rather than wiping — a human must confirm and act. This is the load-bearing guard: even if a stray/empty epoch briefly appears, it can no longer cause surviving nodes to auto-delete real data.
-- `AUTO_BOOTSTRAP_IF_FRESH=true` does not infer freshness from timeouts. Every expected node must answer the authenticated identity probe on its mapped proxy port and repeatedly confirm that both data stores are empty. A preserved node, unreachable node, different app/scope, or changing membership view blocks `initdb`.
-- Single-node automatic first bootstrap is intentionally unavailable because an isolated replacement is indistinguishable from a genuinely new deployment. Use the explicit `ALLOW_NEW_CLUSTER_BOOTSTRAP=true` override for that case, then remove it.
-- Node ordering is used only for a genuinely fresh installation. Recovery authority is selected from unanimously observed PostgreSQL data ownership, never from the lowest IP/name.
-- `DEAD_CLUSTER_RECOVERY` preserves the sole authoritative PostgreSQL data directory. It never selects between multiple data copies and never wipes the authoritative node.
-- Membership removals and `ETCD_INITIAL_CLUSTER` rewrites are gated by desired-state stability to reduce churn-induced drift.
-
-> ⚠️ **Backups are not optional.** This is an HA cluster, not a backup. Replication protects against a node failing, **not** against a bad epoch, an operator mistake, or the failure modes above. Enable the built-in [backup agent](#backups) and/or configure continuous WAL archiving (pgBackRest/WAL-G) before storing anything you care about. Verify restores regularly.
+- **First creation is an explicit offline operator operation.** Normal startup never runs `initdb`, regardless of legacy bootstrap flags.
+- **Remember the original database identity automatically.** Existing PGDATA supplies it; empty replacements require authenticated, quorum-backed agreement before learning it. `EXPECTED_POSTGRES_SYSTEM_ID` is an optional extra constraint, not a rollout prerequisite.
+- **Preserve healthy members.** Discovery omissions never remove a reachable healthy member or self; unreachable removals need quorum and repeated failures.
+- **Preserve PostgreSQL data.** A mismatched identity is quarantined. The proxy rejects unknown/foreign identities and conflicting primaries, clears unverified targets, and closes connections to invalidated targets.
+- **Recovery requires evidence from remembered active peers.** After majority loss, fence and explicitly retire unreachable former placements before authorizing control-plane recovery.
+- See [CLUSTER_SAFETY.md](CLUSTER_SAFETY.md) for creation, upgrades, replacement, disaster recovery, and backup requirements.
 
 ### Recovering the cluster from a backup
 
-The automatic recovery workflow is:
-
-1. Stop or redeploy all cluster nodes.
-2. Restore the selected backup into `/var/lib/postgresql/data` on **one node only**.
-3. Start/redeploy the other expected nodes with genuinely empty PostgreSQL data directories. Keep the same app name, Patroni scope, membership, ports, TLS passphrase, and PostgreSQL passwords on every node.
-4. Start all nodes. Their authenticated identity endpoints must be mutually reachable through the mapped proxy port.
-
-The nodes repeatedly exchange their app/scope, membership view, PGDATA and etcd state, PostgreSQL system identifier, durable role, timeline, and WAL recovery position. Recovery proceeds when either exactly one node has readable PostgreSQL data, or total DCS loss is unanimous and matching PostgreSQL copies identify a unique former primary. If that primary disappeared during Flux rescheduling, the most advanced surviving replica on the common timeline becomes authoritative; equal WAL positions are resolved by deterministic node-name order. The authoritative node then:
-
-- rebuilds the single-member etcd control plane and records its restored PostgreSQL system identifier;
-- clears only stale Patroni election/health keys while preserving dynamic configuration;
-- promotes the restored PostgreSQL instance;
-- restores required `pg_hba`, `pg_rewind`, `postgres`, and `replicator` invariants from the configured environment.
-
-The empty nodes join etcd as learners, are promoted after synchronizing, and let Patroni obtain a fresh `pg_basebackup` from the recovered primary. Patroni uses the local `127.0.0.1:2379` etcd endpoint for its own node, avoiding public-port hairpin NAT failures.
-
-Automatic recovery intentionally stops if any node is unreachable, more than one node contains PostgreSQL data (even when the system IDs match), or membership views disagree. In that case, do not enable a bootstrap override: first decide which copy is authoritative and make the other nodes empty. This conservative refusal is what prevents split brain and accidental selection of an older data copy.
+Restore a verified physical backup to one stopped node, retain its system ID in
+the recovery records (optionally also as `EXPECTED_POSTGRES_SYSTEM_ID`), and follow the fencing and
+retirement procedure in [CLUSTER_SAFETY.md](CLUSTER_SAFETY.md). Empty replicas
+clone the recovered database. Unknown former writers block recovery until they
+are accounted for. A logical restore requires an explicitly created new cluster
+and a deliberately updated deployment identity.
 
 ### Synchronous Replication
 
@@ -235,14 +255,14 @@ Set `PATRONI_SYNCHRONOUS_MODE=true` to switch to **synchronous quorum replicatio
 
 ### Startup Process
 
-1. **Discovery Phase**: Container calls `https://api.runonflux.io/apps/location/{APP_NAME}` to get all cluster member IPs
+1. **Discovery Phase**: Combine Flux locations with durable membership, configured seeds, and self. Flux locations are discovery hints, not complete membership authority.
 2. **Configuration Generation**: Creates Patroni and etcd configuration files using discovered IPs
 3. **Service Startup**: Supervisord starts etcd, then Patroni, then the cluster update daemon
 
 ### Dynamic Membership
 
 - **Background Process**: Continuously monitors Flux API (every 60 seconds)
-- **Automatic Removal**: Removes nodes from etcd cluster when they're no longer in the API response
+- **Conservative Removal**: Never removes self or a reachable healthy member. Removing an omitted unreachable member requires quorum and repeated direct failures.
 - **Self-Registration**: New nodes automatically join the cluster when they start up
 
 ### Service Management
@@ -404,6 +424,12 @@ pip install -r requirements-test.txt
 # All scenarios
 pytest tests/ -v
 
+# Exercise the PostgreSQL 15 variant, including explicit creation and recovery
+pytest tests/ -v --postgres-major=15
+
+# Optional rolling security-build upgrade from a previous safety-enabled etcd 3.5 image
+pytest tests/scenarios/test_package_upgrade.py -v --upgrade-from-image=OLD_IMAGE
+
 # Individual scenarios
 pytest tests/scenarios/test_normal_failover.py -v
 pytest tests/scenarios/test_ec1_unreachable_node.py -v
@@ -411,12 +437,14 @@ pytest tests/scenarios/test_ec2_late_api_registration.py -v
 pytest tests/scenarios/test_ec3_majority_replacement.py -v
 ```
 
+The harness explicitly creates and pins each fresh test cluster. Readiness requires a writable primary and direct live-member probes; cached DCS membership alone is insufficient. Use `pytest tests/unit/ -q` for the harness regression checks. After building the selected PostgreSQL variant from the current runtime source, `--skip-image-build` reuses those images while iterating on tests. The two variants use the same local Compose image names, so run them sequentially and rebuild when switching majors.
+
 The test suite automatically builds images, starts a fresh cluster per module, and tears it down after. The `docker-compose.test.yml` override shortens all timeouts for faster test runs:
 
 | Override | Test value | Purpose |
 |---|---|---|
-| `UPDATE_INTERVAL_SECONDS` | `15` | Faster updater loop |
-| `DESIRED_STATE_STABILITY_CYCLES` | `2` | 30s stability window |
+| `UPDATE_INTERVAL_SECONDS` | `5` | Faster updater loop |
+| `DESIRED_STATE_STABILITY_CYCLES` | `2` | Repeated equal discovery views |
 | `PATRONI_TTL` | `15` | Faster leader failover |
 | `PATRONI_LOOP_WAIT` | `5` | Faster Patroni loop |
 
@@ -436,6 +464,17 @@ Check logs for each component:
 /var/log/supervisor/updater.out.log
 /var/log/supervisor/proxy.out.log
 ```
+
+### Dependency maintenance
+
+The agent is built with Go 1.27.3. Patroni runs under `/opt/patroni/bin/python3` in an isolated environment installed from `requirements-runtime.txt`, which pins all runtime Python packages and their PyPI SHA256 hashes. Refresh the lock for Ubuntu 24.04's Python 3.12, including transitive dependencies, and run `pip check`, vulnerability scans, and the cluster scenarios before publishing. The newer runtime supports dnspython 2.9.0, which fixes CVE-2026-114605 and requires Python 3.11 or later. Python installation tools and C development packages are excluded from the runtime image.
+
+`bin/etcd` and `bin/etcdctl` are Linux/amd64 **etcd 3.5.35** executables rebuilt from the pinned upstream source with `golang.org/x/net` upgraded to **v0.62.0**, fixing CVE-2026-78661. See [build provenance and reproduction](bin/ETCD_BUILD.md). `bin/SHA256SUMS` verifies both executables during image builds. Rebuild both binaries and update the checksums together when upgrading; an APT refresh does not update these embedded Go dependencies.
+
+The package-audit workflow checks Go vulnerabilities and builds/scans both PostgreSQL variants and the mock API on changes and weekly. Fixable high/critical image findings fail the workflow. Dependabot checks Docker, Python, and Actions dependencies weekly. Image publishing uses fresh base images and uncached package installation to pick up Ubuntu security backports, and records the source commit in the `org.opencontainers.image.revision` label.
+
+PostgreSQL minor releases are installed from PGDG. Keep major-version migrations separate from package refreshes: PostgreSQL 14 support ends November 12, 2026, and changing an image tag cannot migrate an existing data directory.
+
 ## Related Projects
 
 - Flux Postgres Cluster: [https://github.com/RunOnFlux/flux-pg-cluster](https://github.com/RunOnFlux/flux-pg-cluster)

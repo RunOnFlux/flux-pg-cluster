@@ -24,6 +24,7 @@ Subcommands:
   daemon       Run the cluster reconciliation loop (replaces update-cluster.sh)
   proxy        Run TCP proxy routing writes to the current Patroni primary
   backup       Run periodic pg_dumpall backups on the primary (opt-in)
+  create-cluster  Explicit first-time PostgreSQL creation; prints deployment identity
   version      Print version and exit
   help         Print this help message
 `, version)
@@ -35,6 +36,14 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "create-cluster":
+		runCreateCluster(os.Args[2:])
+	case "refuse-initdb":
+		runRefuseInitDB()
+	case "patroni-start":
+		runPatroniStart()
+	case "verify-promotion":
+		runVerifyPromotion()
 	case "init":
 		runInit(os.Args[2:])
 	case "etcd-start":

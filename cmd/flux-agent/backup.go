@@ -146,6 +146,11 @@ func runBackupCycle(cfg *config.Config, dir string, retain int, maxBytes int64) 
 // as a running primary. We query the local REST API on 127.0.0.1 to avoid
 // hairpin-NAT issues with the node's own public IP.
 func localIsHealthyPrimary(cfg *config.Config) bool {
+	expected, err := expectedSystemID(cfg)
+	if err != nil {
+		pkglog.Errorf("backup blocked: %v", err)
+		return false
+	}
 	pc := patroni.New(cfg.SSLEnabled, cfg.PatroniAPIPort)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -156,7 +161,7 @@ func localIsHealthyPrimary(cfg *config.Config) bool {
 	}
 	roleOK := info.Role == "primary" || info.Role == "master"
 	stateOK := info.State == "running"
-	if !roleOK || !stateOK {
+	if !roleOK || !stateOK || info.DatabaseSystemIdentifier != expected {
 		pkglog.Infof("local node role=%q state=%q — not a backup target", info.Role, info.State)
 		return false
 	}

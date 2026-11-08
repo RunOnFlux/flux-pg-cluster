@@ -6,6 +6,7 @@ package etcdmgr
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -62,6 +63,31 @@ func (c *Client) MemberList(ctx context.Context) ([]Member, error) {
 	return ParseMemberList(out), nil
 }
 
+func (c *Client) ClusterID(ctx context.Context) (string, error) {
+	out, err := c.run(ctx, 5*time.Second, "endpoint", "status", "--write-out=json")
+	if err != nil {
+		return "", err
+	}
+	return ParseClusterID(out)
+}
+
+func ParseClusterID(out string) (string, error) {
+	var statuses []struct {
+		Status struct {
+			Header struct {
+				ClusterID uint64 `json:"cluster_id"`
+			} `json:"header"`
+		} `json:"Status"`
+	}
+	if err := json.Unmarshal([]byte(out), &statuses); err != nil {
+		return "", err
+	}
+	if len(statuses) != 1 || statuses[0].Status.Header.ClusterID == 0 {
+		return "", fmt.Errorf("etcd status has no unique cluster identity")
+	}
+	return fmt.Sprintf("%x", statuses[0].Status.Header.ClusterID), nil
+}
+
 // MemberAdd registers a new peer as a full voting member.
 func (c *Client) MemberAdd(ctx context.Context, name, peerURL string) error {
 	_, err := c.run(ctx, 10*time.Second, "member", "add", name, "--peer-urls="+peerURL)
@@ -108,6 +134,26 @@ func (c *Client) SetWithTTL(ctx context.Context, key, value string, ttlSecs int)
 func (c *Client) Set(ctx context.Context, key, value string) error {
 	_, err := c.run(ctx, 5*time.Second, "put", key, value)
 	return err
+}
+
+// CompareAndSwap never replaces a concurrently changed initialization identity.
+func (c *Client) CompareAndSwap(ctx context.Context, key, old, value string) error {
+	if strings.ContainsAny(key+old+value, "\n\r\"") {
+		return fmt.Errorf("invalid transaction value")
+	}
+	full := append([]string{}, c.SSLOpts...)
+	full = append(full, "--endpoints="+c.Endpoint, "--dial-timeout=5s", "txn", "--interactive=false")
+	cmd := exec.CommandContext(ctx, "etcdctl", full...)
+	cmd.Env = append(os.Environ(), "ETCDCTL_API=3")
+	cmd.Stdin = strings.NewReader(fmt.Sprintf("value(\"%s\") = \"%s\"\n\nput %s %s\n\n\n", key, old, key, value))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("etcd CAS: %w: %s", err, out)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(out)), "SUCCESS") {
+		return fmt.Errorf("initialization identity changed concurrently")
+	}
+	return nil
 }
 
 // Get retrieves a key's value. Returns ("", nil) if the key does not exist.

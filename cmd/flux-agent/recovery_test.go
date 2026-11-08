@@ -413,6 +413,9 @@ func TestMergePatroniRecoveryConfigPreservesCustomSettings(t *testing.T) {
 	if pg["use_pg_rewind"] != true || len(pg["pg_hba"].([]interface{})) != len(requiredPatroniHBA)+1 {
 		t.Fatal("recovery invariants were not applied")
 	}
+	if !containsString(interfaceStrings(pg["pg_hba"].([]interface{})), "local all postgres peer") {
+		t.Fatal("local peer authentication for credential reconciliation was not restored")
+	}
 	if pg["pg_hba"].([]interface{})[0] != "local all custom peer" {
 		t.Fatal("custom HBA rules were overwritten")
 	}
@@ -421,6 +424,16 @@ func TestMergePatroniRecoveryConfigPreservesCustomSettings(t *testing.T) {
 	if err != nil || changed || again != merged {
 		t.Fatalf("merge must be idempotent: changed=%v err=%v", changed, err)
 	}
+}
+
+func interfaceStrings(values []interface{}) []string {
+	strings := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			strings = append(strings, text)
+		}
+	}
+	return strings
 }
 
 func TestPostgresCredentialSQLIsIdempotentAndEscapesPasswords(t *testing.T) {
@@ -436,5 +449,30 @@ func TestPostgresCredentialSQLIsIdempotentAndEscapesPasswords(t *testing.T) {
 		if !strings.Contains(sql, want) {
 			t.Fatalf("credential SQL missing %q:\n%s", want, sql)
 		}
+	}
+}
+
+func TestEmptyDCSConfigurationKeepsConfiguredDurabilityPolicy(t *testing.T) {
+	cfg := recoveryTestConfig()
+	cfg.PatroniSynchronousMode = true
+	cfg.PatroniSynchronousModeStrict = true
+	cfg.PatroniSynchronousNodeCount = 2
+	cfg.PatroniFailsafeMode = true
+	cfg.PatroniUseSlots = true
+	raw, changed, err := mergePatroniRecoveryConfig("", cfg)
+	if err != nil || !changed {
+		t.Fatalf("create DCS configuration: %v %v", changed, err)
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"synchronous_mode", "synchronous_mode_strict", "failsafe_mode"} {
+		if got[key] != true {
+			t.Fatalf("configured %s lost: %s", key, raw)
+		}
+	}
+	if got["synchronous_node_count"] != float64(2) || got["postgresql"].(map[string]interface{})["use_slots"] != true {
+		t.Fatal(raw)
 	}
 }

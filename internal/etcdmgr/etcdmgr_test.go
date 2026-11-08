@@ -58,6 +58,18 @@ func TestParseMemberList_Empty(t *testing.T) {
 	}
 }
 
+func TestParseClusterIDKeepsFullUint64Identity(t *testing.T) {
+	id, err := ParseClusterID(`[{"Status":{"header":{"cluster_id":18446744073709551615}}}]`)
+	if err != nil || id != "ffffffffffffffff" {
+		t.Fatalf("identity=%s err=%v", id, err)
+	}
+	for _, raw := range []string{`[]`, `[{"Status":{"header":{"cluster_id":0}}}]`, `{broken`} {
+		if _, err := ParseClusterID(raw); err == nil {
+			t.Fatalf("invalid status accepted: %s", raw)
+		}
+	}
+}
+
 func TestFindByPeerURL(t *testing.T) {
 	ms := []Member{
 		{ID: "a", PeerURLs: "https://1.1.1.1:2380"},

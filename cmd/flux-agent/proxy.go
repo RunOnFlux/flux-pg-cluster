@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -58,6 +59,7 @@ func runProxy(args []string) {
 	// Atomic primary IP - updated by health checker, read by acceptor.
 	var primaryIP atomic.Value
 	primaryIP.Store("") // empty until first probe finds one
+	sessions := &proxySessions{connections: make(map[net.Conn]string)}
 
 	// Health-check goroutine: probes all known IPs to find primary.
 	go func() {
@@ -65,12 +67,14 @@ func runProxy(args []string) {
 		defer ticker.Stop()
 		// Initial probe immediately
 		probePrimary(ctx, cfg, &primaryIP)
+		sessions.apply(primaryIP.Load().(string))
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				probePrimary(ctx, cfg, &primaryIP)
+				sessions.apply(primaryIP.Load().(string))
 			}
 		}
 	}()
@@ -103,7 +107,7 @@ func runProxy(args []string) {
 				continue
 			}
 		}
-		go handleProxyConn(conn, primaryIP.Load().(string), cfg, *targetPort)
+		go handleProxyConn(conn, primaryIP.Load().(string), cfg, *targetPort, sessions)
 	}
 }
 
@@ -116,41 +120,54 @@ func probePrimary(ctx context.Context, cfg *config.Config, primaryIP *atomic.Val
 	if err := config.LoadClusterEnv(&probeCfg); err != nil {
 		pkglog.Warnf("proxy: could not reload %s: %v", config.ClusterEnvFile, err)
 	}
-	ips := candidateIPs(&probeCfg)
-	if len(ips) == 0 {
+	ips, err := discoveryIPsAt(&probeCfg, postgresDataDir, candidateIPs(&probeCfg))
+	if err != nil {
+		primaryIP.Store("")
+		return
+	}
+	id, err := expectedSystemID(&probeCfg)
+	if err != nil {
+		pkglog.Warnf("proxy blocked: %v", err)
+		primaryIP.Store("")
 		return
 	}
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-
 	clients := newPatroniProbeClients(&probeCfg)
-
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	found := ""
+	primaries := map[string]string{}
 	for _, ip := range ips {
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
-			role := checkPatroniRole(pctx, &probeCfg, ip, clients)
-			if role == patroni.RolePrimary {
-				mu.Lock()
-				found = ip
-				mu.Unlock()
+			host, port := patroniProbeTarget(&probeCfg, ip)
+			pc := clients.remote
+			if port == probeCfg.PatroniAPIPort {
+				pc = clients.local
 			}
+			// /primary checks the leader lock; /patroni supplies identity.
+			role, err := pc.CheckRole(pctx, host)
+			if err != nil || role != patroni.RolePrimary {
+				return
+			}
+			info, err := pc.GetInfo(pctx, host)
+			if err != nil || info.State != "running" {
+				return
+			}
+			mu.Lock()
+			primaries[ip] = info.DatabaseSystemIdentifier
+			mu.Unlock()
 		}(ip)
 	}
 	wg.Wait()
-
+	found := selectPinnedPrimary(id, primaries)
 	prev, _ := primaryIP.Load().(string)
-	if found != "" && found != prev {
-		pkglog.Infof("proxy: primary changed: %q -> %q", prev, found)
-		primaryIP.Store(found)
-	} else if found == "" && prev != "" {
-		pkglog.Warnf("proxy: no primary currently reachable (keeping last known: %q)", prev)
-	} else if found == "" && prev == "" {
-		pkglog.Warnf("proxy: no primary found among candidates %v", ips)
+	primaryIP.Store(found)
+	if found != prev {
+		pkglog.Infof("proxy: verified primary changed: %q -> %q", prev, found)
 	}
+
 }
 
 // patroniProbeClients holds reusable Patroni HTTP clients for one probe cycle.
@@ -245,7 +262,7 @@ func indexByte(s string, b byte) int {
 // handleProxyConn dials the current primary and bidirectionally copies bytes.
 // When the primary is this node, dial via localhost and the container Postgres
 // port to avoid hairpin NAT failures on the public IP.
-func handleProxyConn(client net.Conn, primaryIP string, cfg *config.Config, hostPostgresPort int) {
+func handleProxyConn(client net.Conn, primaryIP string, cfg *config.Config, hostPostgresPort int, registries ...*proxySessions) {
 	defer client.Close()
 	reader := bufio.NewReader(client)
 	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -264,13 +281,19 @@ func handleProxyConn(client net.Conn, primaryIP string, cfg *config.Config, host
 		pkglog.Warnf("proxy: rejecting connection from %s — no primary known yet", client.RemoteAddr())
 		return
 	}
+	if len(registries) > 0 {
+		if !registries[0].add(client, primaryIP) {
+			return
+		}
+		defer registries[0].remove(client)
+	}
 	dialHost := primaryIP
 	dialPort := hostPostgresPort
 	if cfg.MyIP != "" && primaryIP == cfg.MyIP {
 		dialHost = "127.0.0.1"
 		dialPort = cfg.PostgresPort
 	}
-	target := fmt.Sprintf("%s:%d", dialHost, dialPort)
+	target := net.JoinHostPort(dialHost, strconv.Itoa(dialPort))
 	upstream, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
 		pkglog.Warnf("proxy: dial %s: %v", target, err)
@@ -331,4 +354,50 @@ func (w *connResponseWriter) Write(p []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.Conn.Write(p)
+}
+
+// Multiple primaries (including a foreign identity) are a conflict, never a
+// race to choose whichever HTTP request finished last.
+func selectPinnedPrimary(expected string, primaries map[string]string) string {
+	if expected == "" || len(primaries) != 1 {
+		return ""
+	}
+	for ip, id := range primaries {
+		if id == expected {
+			return ip
+		}
+	}
+	return ""
+}
+
+type proxySessions struct {
+	mu          sync.Mutex
+	target      string
+	connections map[net.Conn]string
+}
+
+func (s *proxySessions) apply(target string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.target = target
+	for conn, ip := range s.connections {
+		if target == "" || ip != target {
+			_ = conn.Close()
+			delete(s.connections, conn)
+		}
+	}
+}
+func (s *proxySessions) add(conn net.Conn, ip string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ip == "" || ip != s.target {
+		return false
+	}
+	s.connections[conn] = ip
+	return true
+}
+func (s *proxySessions) remove(conn net.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.connections, conn)
 }

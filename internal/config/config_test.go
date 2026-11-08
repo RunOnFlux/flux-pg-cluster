@@ -16,6 +16,24 @@ func TestHostProxyPortDefaultsToMappedPortAfterPostgres(t *testing.T) {
 	}
 }
 
+func TestProductionBootstrapDefaultsAndIdentitySettings(t *testing.T) {
+	t.Setenv("AUTO_BOOTSTRAP_IF_FRESH", "")
+	t.Setenv("ALLOW_NEW_CLUSTER_BOOTSTRAP", "")
+	t.Setenv("EXPECTED_POSTGRES_SYSTEM_ID", "7658016226426196166")
+	cfg := FromEnv()
+	if cfg.AutoBootstrapIfFresh || cfg.AllowNewClusterBootstrap {
+		t.Fatal("normal startup must not authorize creation")
+	}
+	if cfg.ExpectedSystemID != "7658016226426196166" {
+		t.Fatal("deployment identity not loaded")
+	}
+	cfg.applyKV("CLUSTER_SEED_IPS", "10.0.0.1,10.0.0.2")
+	cfg.applyKV("RETIRED_CLUSTER_IPS", "10.0.0.3")
+	if cfg.ClusterSeedIPs != "10.0.0.1,10.0.0.2" || cfg.RetiredClusterIPs != "10.0.0.3" {
+		t.Fatal("membership settings not loaded")
+	}
+}
+
 func TestHostProxyPortExplicitOverride(t *testing.T) {
 	t.Setenv("HOST_POSTGRES_PORT", "15432")
 	t.Setenv("HOST_PROXY_PORT", "25433")

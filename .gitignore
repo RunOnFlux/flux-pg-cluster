@@ -5,3 +5,6 @@ __pycache__/
 .pytest_cache/
 *.md
 !README.md
+!RECOVERY_CONTROLLER_PLAN.md
+!CLUSTER_SAFETY.md
+!bin/ETCD_BUILD.md
