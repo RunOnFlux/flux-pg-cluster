@@ -50,8 +50,10 @@ RUN apt-get update && apt-get upgrade -y \
     xxd \
     vim-common \
     gnutls-bin \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-        | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg \
+    && curl -fsSL --retry 3 --retry-all-errors --connect-timeout 10 --max-time 60 \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /tmp/postgresql-key.asc \
+    && gpg --batch --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg /tmp/postgresql-key.asc \
+    && rm /tmp/postgresql-key.asc \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
         > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \
