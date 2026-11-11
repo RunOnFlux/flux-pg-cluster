@@ -12,10 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements-runtime.txt /tmp/requirements-runtime.txt
+COPY scripts/patch-patroni-api.py /tmp/patch-patroni-api.py
 RUN python3 -m venv /opt/patroni \
     && /opt/patroni/bin/python -m pip install --no-cache-dir --upgrade pip==26.2.0 \
     && /opt/patroni/bin/python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements-runtime.txt \
     && /opt/patroni/bin/python -m pip check \
+    && /opt/patroni/bin/python /tmp/patch-patroni-api.py \
     && /opt/patroni/bin/python -m pip uninstall -y pip setuptools wheel
 
 FROM ubuntu:24.04

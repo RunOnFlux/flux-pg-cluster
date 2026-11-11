@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 )
@@ -23,6 +24,19 @@ func New(useSSL bool, port int) *Client {
 		// verify is acceptable for in-cluster polling because the proxy lives
 		// on the same trusted host. Same approach as shell `curl -k`.
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: (&net.Dialer{
+			Timeout:   3 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		// A request deadline alone can leave a detached transport dial waiting
+		// for TLS forever. Bound the handshake itself, including mixed rollouts
+		// where an older Patroni server has exhausted its API workers.
+		TLSHandshakeTimeout:   2 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+		IdleConnTimeout:       15 * time.Second,
+		MaxIdleConns:          8,
+		MaxIdleConnsPerHost:   2,
+		MaxConnsPerHost:       4,
 	}
 	scheme := "http"
 	if useSSL {
@@ -34,6 +48,10 @@ func New(useSSL bool, port int) *Client {
 		Port:   port,
 	}
 }
+
+// Close releases pooled connections and cancels abandoned transport dials.
+// Call it when a short-lived probe client is no longer needed.
+func (c *Client) Close() { c.HTTP.CloseIdleConnections() }
 
 // Role represents the Patroni member role.
 type Role string
@@ -101,8 +119,8 @@ type ClusterMember struct {
 
 // NodeInfo is the response from the Patroni /patroni endpoint.
 type NodeInfo struct {
-	Role                    string `json:"role"`
-	State                   string `json:"state"`
+	Role                     string `json:"role"`
+	State                    string `json:"state"`
 	DatabaseSystemIdentifier string `json:"database_system_identifier"`
 }
 

@@ -233,6 +233,7 @@ func probePeerIdentityWithJoin(ctx context.Context, cfg *config.Config, ip strin
 	// Patroni can prove that PGDATA is non-empty, which is sufficient to block a
 	// fresh bootstrap. It can never provide positive "empty" evidence.
 	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
+	defer pc.Close()
 	patroniCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.BootstrapPeerProbeTimeout)*time.Second)
 	defer cancel()
 	info, patroniErr := pc.GetInfo(patroniCtx, ip)

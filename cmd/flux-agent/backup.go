@@ -152,6 +152,7 @@ func localIsHealthyPrimary(cfg *config.Config) bool {
 		return false
 	}
 	pc := patroni.New(cfg.SSLEnabled, cfg.PatroniAPIPort)
+	defer pc.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	info, err := pc.GetInfo(ctx, "127.0.0.1")

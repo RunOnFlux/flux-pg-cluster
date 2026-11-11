@@ -289,7 +289,8 @@ func etcdHealthReachable(endpoint string, cfg *config.Config) bool {
 
 // httpStatus does a minimal GET and returns HTTP status code.
 func httpStatus(url string, tlsCfg *tls.Config, timeout time.Duration) (int, error) {
-	tr := &http.Transport{TLSClientConfig: tlsCfg}
+	tr := &http.Transport{TLSClientConfig: tlsCfg, TLSHandshakeTimeout: 2 * time.Second}
+	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: timeout}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -597,6 +598,7 @@ func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, _ []string, _ 
 		return
 	}
 	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
+	defer pc.Close()
 	primaries := map[string]string{}
 	for _, ip := range candidateIPs(cfg) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -606,6 +608,9 @@ func checkPatroniSystemID(cfg *config.Config, ec *etcdmgr.Client, _ []string, _ 
 			client = patroni.New(cfg.SSLEnabled, port)
 		}
 		info, err := client.GetInfo(ctx, host)
+		if client != pc {
+			client.Close()
+		}
 		if err == nil && info.State == "running" && (info.Role == "primary" || info.Role == "master") {
 			primaries[ip] = info.DatabaseSystemIdentifier
 		}

@@ -1,4 +1,4 @@
-"""Rolling package updates preserve existing PostgreSQL and etcd volumes."""
+"""Rolling image updates preserve existing PostgreSQL and etcd volumes."""
 
 import json
 import subprocess
@@ -52,7 +52,9 @@ def test_rolling_upgrade_preserves_existing_volumes(cluster, project_dir, compos
     for name in BASE_NODES:
         version = cluster._container(name).exec_run(["etcd", "--version"])
         assert version.exit_code == 0 and b"etcd Version: 3.5." in version.output
-        original_versions[name] = version.output
+        agent = cluster._container(name).exec_run(["/app/flux-agent", "version"])
+        assert agent.exit_code == 0
+        original_versions[name] = agent.output.strip()
 
     leader = cluster.get_leader()
     primary = next(name for name, node in BASE_NODES.items() if "node-" + node.ip.replace(".", "-") == leader)
@@ -71,6 +73,9 @@ def test_rolling_upgrade_preserves_existing_volumes(cluster, project_dir, compos
         assert container.image.id == upgrade_images[1]
         version = container.exec_run(["etcd", "--version"])
         assert version.exit_code == 0 and b"3.5.35" in version.output
-        assert version.output != original_versions[name], "upgrade must replace the etcd security build"
+        agent = container.exec_run(["/app/flux-agent", "version"])
+        assert agent.exit_code == 0
+        assert agent.output.strip() == (project_dir / "VERSION").read_bytes().strip()
+        assert agent.output.strip() != original_versions[name], "upgrade must replace the running agent release"
         python = container.exec_run(["python3", "-c", "import sys; print(sys.prefix)"])
         assert python.exit_code == 0 and python.output.strip() == b"/opt/patroni"

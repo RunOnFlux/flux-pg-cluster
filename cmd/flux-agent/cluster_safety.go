@@ -371,7 +371,9 @@ func clusterMemberReachable(cfg *config.Config, ip string) bool {
 	}
 	// Positive legacy Patroni liveness also prevents eviction during rollout;
 	// an unsigned response can never authorize recovery or identity adoption.
-	return patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort).IsAlive(ctx, ip)
+	pc := patroni.New(cfg.SSLEnabled, cfg.HostPatroniAPIPort)
+	defer pc.Close()
+	return pc.IsAlive(ctx, ip)
 }
 
 func anyDCSQuorum(cfg *config.Config) bool {

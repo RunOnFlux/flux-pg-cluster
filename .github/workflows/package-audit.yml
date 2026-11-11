@@ -52,6 +52,15 @@ jobs:
             build_args+=(--build-arg "POSTGRES_MAJOR=$POSTGRES_MAJOR")
           fi
           docker build --pull --no-cache "${build_args[@]}" -t "flux-pg-package-audit:$IMAGE" "$BUILD_CONTEXT"
+      - name: Verify Patroni API survives stalled clients
+        if: matrix.postgres != ''
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --network none \
+            --mount "type=bind,src=$PWD/tests/runtime/check_patroni_api_timeouts.py,dst=/tmp/check_patroni_api_timeouts.py,readonly" \
+            --entrypoint /opt/patroni/bin/python \
+            "flux-pg-package-audit:$IMAGE" /tmp/check_patroni_api_timeouts.py
       - name: Install verified vulnerability scanner
         run: |
           scanner_url=https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_Linux-64bit.tar.gz

@@ -119,6 +119,7 @@ func localReplacementProof(ctx context.Context, cfg *config.Config, identity nod
 		return nil
 	}
 	pc := patroni.New(cfg.SSLEnabled, cfg.PatroniAPIPort)
+	defer pc.Close()
 	info, err := pc.GetInfo(ctx, "127.0.0.1")
 	if err != nil || !runningReplacementDatabase(info, p.SystemID) {
 		return nil
@@ -151,7 +152,10 @@ func legacyReplacementInfoAt(ctx context.Context, cfg *config.Config, ip, caPath
 	if !roots.AppendCertsFromPEM(ca) {
 		return nil, errors.New("invalid cluster CA")
 	}
-	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}}
+	tr := &http.Transport{
+		TLSClientConfig:     &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout: 2 * time.Second,
+	}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{Transport: tr, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://"+net.JoinHostPort(ip, fmt.Sprint(cfg.HostPatroniAPIPort))+"/patroni", nil)

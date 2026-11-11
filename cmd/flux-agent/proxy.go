@@ -134,6 +134,7 @@ func probePrimary(ctx context.Context, cfg *config.Config, primaryIP *atomic.Val
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	clients := newPatroniProbeClients(&probeCfg)
+	defer clients.close()
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	primaries := map[string]string{}
@@ -176,6 +177,13 @@ func probePrimary(ctx context.Context, cfg *config.Config, primaryIP *atomic.Val
 type patroniProbeClients struct {
 	local  *patroni.Client
 	remote *patroni.Client
+}
+
+func (clients patroniProbeClients) close() {
+	clients.local.Close()
+	if clients.remote != clients.local {
+		clients.remote.Close()
+	}
 }
 
 func newPatroniProbeClients(cfg *config.Config) patroniProbeClients {
