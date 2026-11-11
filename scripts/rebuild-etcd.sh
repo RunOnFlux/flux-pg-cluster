@@ -10,7 +10,7 @@ git clone --depth 1 --branch v3.5.35 https://github.com/etcd-io/etcd.git "$sourc
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_commit"
 git -C "$source_dir" apply --unidiff-zero "$repo_dir/bin/etcd-xnet.patch"
 
-export GOTOOLCHAIN=go1.27.3 CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+export GOTOOLCHAIN=go1.27.4 CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 for module in server etcdctl; do
   binary=etcdctl
   if [[ "$module" == server ]]; then binary=etcd; fi
