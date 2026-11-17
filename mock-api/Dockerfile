@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS dependencies
+FROM python:3.15-slim AS dependencies
 WORKDIR /app
 COPY requirements.txt .
 RUN python -m venv /opt/mock-api \
@@ -6,7 +6,7 @@ RUN python -m venv /opt/mock-api \
     && /opt/mock-api/bin/pip check \
     && /opt/mock-api/bin/pip uninstall -y pip setuptools wheel
 
-FROM python:3.11-slim
+FROM python:3.15-slim
 RUN apt-get update && apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/* \
     && python -m pip uninstall -y pip setuptools wheel
