@@ -6,7 +6,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w -X main.version=$(cat VERSION)" -o /out/flux-agent ./cmd/flux-agent
 
 # Build an isolated Python environment; installation tools stay out of runtime.
-FROM ubuntu:24.04 AS pythonbuild
+FROM ubuntu:25.10 AS pythonbuild
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv ca-certificates \
@@ -20,7 +20,7 @@ RUN python3 -m venv /opt/patroni \
     && /opt/patroni/bin/python /tmp/patch-patroni-api.py \
     && /opt/patroni/bin/python -m pip uninstall -y pip setuptools wheel
 
-FROM ubuntu:24.04
+FROM ubuntu:25.10
 
 ARG POSTGRES_MAJOR=14
 ARG VERSION=dev
