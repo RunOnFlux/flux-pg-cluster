@@ -8,7 +8,7 @@ source_commit=b0dc93710686bba178c9b6408e545be21d27b2ce
 
 git clone --depth 1 --branch v3.5.35 https://github.com/etcd-io/etcd.git "$source_dir"
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$source_commit"
-git -C "$source_dir" apply --unidiff-zero "$repo_dir/bin/etcd-xnet.patch"
+git -C "$source_dir" apply --unidiff-zero "$repo_dir/bin/etcd-security.patch"
 
 export GOTOOLCHAIN=go1.27.4 CGO_ENABLED=0 GOOS=linux GOARCH=amd64
 for module in server etcdctl; do
@@ -17,10 +17,10 @@ for module in server etcdctl; do
   (
     cd "$source_dir/$module"
     go build -trimpath -buildvcs=false \
-      -ldflags '-s -w -X go.etcd.io/etcd/api/v3/version.GitSHA=b0dc937-flux-xnet062' \
+      -ldflags '-s -w -X go.etcd.io/etcd/api/v3/version.GitSHA=b0dc937-flux-security' \
       -o "$repo_dir/bin/$binary" .
   )
 done
 
 (cd "$repo_dir/bin" && sha256sum etcd etcdctl > SHA256SUMS)
-printf 'Built etcd 3.5.35 with x/net v0.62.0; retained source at %s\n' "$source_dir"
+printf 'Built etcd 3.5.35 with x/net v0.62.0, OpenTelemetry v1.47.0, and x/crypto v0.59.0; retained source at %s\n' "$source_dir"

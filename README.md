@@ -430,6 +430,9 @@ pytest tests/ -v --postgres-major=15
 # Optional rolling security-build upgrade from a previous safety-enabled etcd 3.5 image
 pytest tests/scenarios/test_package_upgrade.py -v --upgrade-from-image=OLD_IMAGE
 
+# Optional rollout from an actual pre-safety, auto-bootstrap deployment
+pytest tests/scenarios/test_unpinned_replacement.py -v --legacy-from-image=LEGACY_IMAGE
+
 # Individual scenarios
 pytest tests/scenarios/test_normal_failover.py -v
 pytest tests/scenarios/test_ec1_unreachable_node.py -v
@@ -437,7 +440,7 @@ pytest tests/scenarios/test_ec2_late_api_registration.py -v
 pytest tests/scenarios/test_ec3_majority_replacement.py -v
 ```
 
-The harness explicitly creates and pins each fresh test cluster. Readiness requires a writable primary and direct live-member probes; cached DCS membership alone is insufficient. Use `pytest tests/unit/ -q` for the harness regression checks. After building the selected PostgreSQL variant from the current runtime source, `--skip-image-build` reuses those images while iterating on tests. The two variants use the same local Compose image names, so run them sequentially and rebuild when switching majors.
+The harness explicitly creates and pins each fresh test cluster. Readiness requires a writable primary and direct live-member probes; cached DCS membership alone is insufficient. Use `pytest tests/unit/ -q` for the harness regression checks. After building the selected PostgreSQL variant from the current runtime source, `--skip-image-build` reuses those images while iterating on tests. The two variants use the same local Compose image names, so run them sequentially and rebuild when switching majors. The package-upgrade and legacy-rollout options select separate baselines: safety-enabled releases require explicit creation, while the legacy fixture intentionally exercises the older auto-bootstrap contract. Both options may be supplied to a full-suite run.
 
 The image audit also runs `tests/runtime/check_patroni_api_timeouts.py` inside each PostgreSQL image. It occupies all five API workers with silent TLS clients or completed TLS connections that never send HTTP, then verifies that normal API requests recover within bounded time. The Go client tests cover repeated cancelled probes against a silent TLS peer and release of discarded transports.
 
@@ -469,13 +472,13 @@ Check logs for each component:
 
 ### Dependency maintenance
 
-The agent is built with Go 1.27.4. Patroni runs under `/opt/patroni/bin/python3` in an isolated environment installed from `requirements-runtime.txt`, which pins all runtime Python packages and their PyPI SHA256 hashes. Refresh the lock for Ubuntu 24.04's Python 3.12, including transitive dependencies, and run `pip check`, vulnerability scans, and the cluster scenarios before publishing. The newer runtime supports dnspython 2.9.0, which fixes CVE-2026-114605 and requires Python 3.11 or later. Python installation tools and C development packages are excluded from the runtime image.
+The agent is built with Go 1.27.4. Patroni runs under `/opt/patroni/bin/python3` in an isolated environment installed from `requirements-runtime.txt`, which pins all runtime Python packages and their PyPI SHA256 hashes. Refresh the lock for Ubuntu 24.04's Python 3.12, including transitive dependencies, and run `pip check`, vulnerability scans, and the cluster scenarios before publishing. The newer runtime supports dnspython 2.9.2, which fixes CVE-2026-114605 and CVE-2026-128089 and requires Python 3.11 or later. Python installation tools and C development packages are excluded from the runtime image.
 
 Version 1.5.2 backports Patroni API socket timeouts through `scripts/patch-patroni-api.py`: TLS handshakes are bounded to two seconds, HTTP request/response socket I/O to five seconds, and TLS shutdown to one second. The script checks the pinned API source checksum and stops the build if a dependency upgrade changes it; review or remove the backport when updating Patroni. The agent also bounds its outgoing TLS handshakes and closes discarded probe transports. These protections apply without new deployment ENVs and support staggered updates with older peers. If direct SQL works while the proxy reports no primary and the API stalls during TLS, inspect API worker/socket exhaustion before attempting any PostgreSQL or etcd recovery.
 
-`bin/etcd` and `bin/etcdctl` are Linux/amd64 **etcd 3.5.35** executables rebuilt from the pinned upstream source with `golang.org/x/net` upgraded to **v0.62.0**, fixing CVE-2026-78661. See [build provenance and reproduction](bin/ETCD_BUILD.md). `bin/SHA256SUMS` verifies both executables during image builds. Rebuild both binaries and update the checksums together when upgrading; an APT refresh does not update these embedded Go dependencies.
+`bin/etcd` and `bin/etcdctl` are Linux/amd64 **etcd 3.5.35** executables rebuilt from the pinned upstream source with `golang.org/x/net` upgraded to **v0.62.0**, fixing CVE-2026-78661, and OpenTelemetry core/SDK upgraded to **v1.47.0**, fixing CVE-2026-128085. `golang.org/x/crypto` is updated to **v0.59.0** for GO-2026-5932. The existing compatible gRPC instrumentation and exporter versions are retained. See [build provenance and reproduction](bin/ETCD_BUILD.md). `bin/SHA256SUMS` verifies both executables during image builds. Rebuild both binaries and update the checksums together when upgrading; an APT refresh does not update these embedded Go dependencies.
 
-The package-audit workflow checks Go vulnerabilities and builds/scans both PostgreSQL variants and the mock API on changes and weekly. Fixable high/critical image findings fail the workflow. Dependabot checks Docker, Python, and Actions dependencies weekly. Image publishing uses fresh base images and uncached package installation to pick up Ubuntu security backports, and records the source commit in the `org.opencontainers.image.revision` label.
+The package-audit workflow checks Go vulnerabilities and builds/scans both PostgreSQL variants and the mock API on pushes and pull requests targeting `development`, or manually on `development`. Fixable high/critical image findings fail the workflow. Dependabot checks Docker, Python, and Actions dependencies weekly. Image publishing uses fresh base images and uncached package installation to pick up Ubuntu security backports, and records the source commit in the `org.opencontainers.image.revision` label.
 
 PostgreSQL minor releases are installed from PGDG. Keep major-version migrations separate from package refreshes: PostgreSQL 14 support ends November 12, 2026, and changing an image tag cannot migrate an existing data directory.
 

@@ -40,6 +40,7 @@ def pytest_addoption(parser):
     parser.addoption("--skip-image-build", action="store_true", help="Reuse images already built from the current runtime source")
     parser.addoption("--postgres-major", choices=("14", "15"), default="14", help="PostgreSQL image variant to build and exercise")
     parser.addoption("--upgrade-from-image", help="Pre-update safety-enabled image for the optional rolling package-upgrade test")
+    parser.addoption("--legacy-from-image", help="Pre-safety auto-bootstrap image for the optional legacy-volume rollout tests")
 
 
 @pytest.fixture(scope="session")

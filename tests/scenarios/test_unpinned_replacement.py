@@ -14,9 +14,9 @@ from tests.helpers.lifecycle import start_new_cluster
 @pytest.fixture(scope="module")
 def running_cluster(project_dir, compose_cmd, built_image, request):
     previous = compose_cmd[:]
-    legacy = request.config.getoption("--upgrade-from-image")
+    legacy = request.config.getoption("--legacy-from-image")
     if legacy:
-        # Exercise the actual old deployment contract: auto-initialized 1.4,
+        # Exercise the old deployment contract: a pre-safety auto-initialized cluster,
         # persisted PGDATA/etcd, and no new identity environment variable.
         override = project_dir / ".pytest_cache" / "replacement-legacy.json"
         override.parent.mkdir(exist_ok=True)
@@ -112,7 +112,7 @@ def test_unpinned_empty_nodes_do_not_initialize_after_total_outage(cluster, mock
 
 
 def test_legacy_volume_rollout_needs_no_identity_env(cluster, project_dir, compose_cmd, request):
-    if not request.config.getoption("--upgrade-from-image"):
+    if not request.config.getoption("--legacy-from-image"):
         pytest.skip("provide the actual legacy image to exercise the legacy rollout")
     original_id = cluster.get_pg_system_id("postgres-node1")
     cluster.exec_sql("CREATE TABLE legacy_rollout_sentinel (value text)")
