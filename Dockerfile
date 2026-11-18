@@ -81,7 +81,7 @@ COPY diagnose.sh /app/diagnose.sh
 COPY generate-certs.sh /app/generate-certs.sh
 COPY VERSION /app/VERSION
 
-# etcd 3.5.35 with the x/net security backport; see bin/ETCD_BUILD.md.
+# etcd 3.5.35 with dependency security backports; see bin/ETCD_BUILD.md.
 COPY bin/etcd bin/etcdctl bin/SHA256SUMS /usr/local/bin/
 RUN cd /usr/local/bin && sha256sum -c SHA256SUMS && rm SHA256SUMS
 

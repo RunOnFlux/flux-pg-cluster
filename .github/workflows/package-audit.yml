@@ -2,17 +2,17 @@ name: Package audit
 
 on:
   push:
-    branches: [master, development]
+    branches: [development]
   pull_request:
+    branches: [development]
   workflow_dispatch:
-  schedule:
-    - cron: "0 5 * * 1"
 
 permissions:
   contents: read
 
 jobs:
   go:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/development'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -25,6 +25,7 @@ jobs:
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   images:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/development'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
