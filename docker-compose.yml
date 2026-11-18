@@ -10,7 +10,7 @@ networks:
 services:
   # Mock Flux API Server
   mock-api:
-    image: nginx:alpine
+    image: nginx:1.31.9-alpine
     container_name: mock-flux-api
     ports:
       - "8080:80"
