@@ -441,6 +441,25 @@ func createCluster(cfg *config.Config, dataDir, confirm, tokenFile string) error
 	if err = os.Remove(tokenFile); err != nil {
 		return err
 	}
+	return initializePostgresCluster(cfg, dataDir)
+}
+
+// Both the explicit operator command and the unanimously authorized automatic
+// path share the same non-destructive initializer. A local lock also prevents
+// an operator command racing the supervised bootstrap process.
+func initializePostgresCluster(cfg *config.Config, dataDir string) error {
+	lock, err := os.OpenFile(dataDir+".create.lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("another database creation is in progress: %w", err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	if cfg.ExpectedSystemID != "" || !directoryIsEmpty(dataDir) {
+		return errors.New("database identity or nonempty PGDATA blocks initialization")
+	}
 	bin, err := discoverPostgresBinDir()
 	if err != nil {
 		return err
@@ -476,7 +495,8 @@ func createCluster(cfg *config.Config, dataDir, confirm, tokenFile string) error
 	if err := os.WriteFile(filepath.Join(dataDir, "pg_hba.conf"), []byte(strings.Join(requiredPatroniHBA, "\n")+"\n"), 0600); err != nil {
 		return err
 	}
-	if err := rememberClusterAt(cfg, dataDir, splitCSV(cfg.ClusterSeedIPs)); err != nil {
+	if err := rememberClusterAt(cfg, dataDir, unionIPs(splitCSV(cfg.ClusterSeedIPs), candidateIPs(cfg),
+		otherIPsFromInitialCluster(cfg.EtcdInitialCluster, ""))); err != nil {
 		return err
 	}
 	// Existing-PGDATA startup bypasses Patroni's post_bootstrap callback. Record
@@ -484,10 +504,10 @@ func createCluster(cfg *config.Config, dataDir, confirm, tokenFile string) error
 	return os.WriteFile(filepath.Join(dataDir, ".flux-agent", "first-creation"), []byte("pending\n"), 0644)
 }
 
-// There is deliberately no initdb fallback. Existing PGDATA can rebuild DCS;
-// empty replicas can clone the pinned cluster. Neither may invent a database.
+// Patroni has no independent initdb fallback. The bootstrap candidate must
+// preinitialize an authorized empty deployment; other nodes clone that seed.
 func runRefuseInitDB() {
-	pkglog.Fatalf("initdb is disabled during normal startup; use flux-agent create-cluster for an intentional first deployment, or restore the pinned cluster")
+	pkglog.Fatalf("Patroni cannot run initdb; use the opt-in all-empty bootstrap policy, flux-agent create-cluster, or restore the pinned cluster")
 }
 
 func runPatroniStart() {

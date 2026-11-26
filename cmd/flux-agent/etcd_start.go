@@ -18,7 +18,8 @@ import (
 
 // runEtcdStart preserves durable Raft state, joins only the pinned database's
 // DCS, and rebuilds a control plane only around proven existing PGDATA.
-// PostgreSQL creation is never part of this state machine.
+// An explicitly enabled, unanimously confirmed empty deployment can also create
+// one seed database. No existing PostgreSQL data is deleted or reinitialized.
 func runEtcdStart(args []string) {
 	fs := flag.NewFlagSet("etcd-start", flag.ExitOnError)
 	dataDir := fs.String("data-dir", "/var/lib/etcd", "etcd data directory")
@@ -443,13 +444,53 @@ func rebuildInitialCluster(members []etcdmgr.Member, myName, myPeerURL string) s
 	return strings.Join(parts, ",")
 }
 
-// decideBootstrap can rebuild only a control plane around preserved PGDATA.
-// PostgreSQL first creation is exclusively an offline operator command.
+// decideBootstrap preserves existing databases. Automatic creation requires an
+// opt-in and repeated authenticated empty-state evidence from the full deployment.
 func decideBootstrap(cfg *config.Config, dataDir string) string {
 	etcdDataEmpty := !etcdHasLocalState(dataDir)
 	pgDataEmpty := !fileExists(postgresDataDir + "/global/pg_control")
-	// Legacy flags are retained for config compatibility but cannot authorize
-	// PostgreSQL creation. Only create-cluster performs initdb, offline.
+	if pgDataEmpty && (cfg.AutoBootstrapIfFresh || cfg.AllowNewClusterBootstrap) {
+		if cfg.ExpectedSystemID != "" || !directoryIsEmpty(postgresDataDir) ||
+			!etcdDataDirectoryIsFresh(dataDir) ||
+			cfg.MyName != bootstrapCandidate(cfg.EtcdInitialCluster) ||
+			!cfg.ProxyEnabled || cfg.HostProxyPort <= 0 || cfg.PostgresReplicationPassword == "" {
+			pkglog.Errorf("automatic creation blocked: data/identity survives, not the candidate, or authenticated peer probes are unavailable")
+			return ""
+		}
+		if !confirmFreshClusterWithPeers(cfg) {
+			return ""
+		}
+		// The updater may change topology/identity while confirmations are in
+		// flight. Discard this attempt instead of creating from an old snapshot.
+		latest := *cfg
+		if err := config.LoadClusterEnv(&latest); err != nil ||
+			latest.EtcdInitialCluster != cfg.EtcdInitialCluster ||
+			latest.AppName != cfg.AppName || latest.PatroniScope != cfg.PatroniScope ||
+			latest.ExpectedSystemID != cfg.ExpectedSystemID ||
+			latest.PostgresReplicationPassword != cfg.PostgresReplicationPassword ||
+			latest.AutoBootstrapIfFresh != cfg.AutoBootstrapIfFresh ||
+			latest.AllowNewClusterBootstrap != cfg.AllowNewClusterBootstrap {
+			pkglog.Errorf("automatic creation cancelled: configuration changed during confirmation")
+			return ""
+		}
+		// Recheck local state after the peer observation window and immediately
+		// before initdb. Partial/failed initialization is retained for inspection.
+		if !etcdDataDirectoryIsFresh(dataDir) || postgresListening(cfg) {
+			return ""
+		}
+		pkglog.Warnf("AUTOMATIC DATABASE CREATION: every declared instance confirmed empty data; external backups are operator-managed")
+		if err := initializePostgresCluster(cfg, postgresDataDir); err != nil {
+			pkglog.Errorf("automatic database creation failed; preserving all files: %v", err)
+			return ""
+		}
+		id, err := expectedSystemID(cfg)
+		if err != nil {
+			pkglog.Errorf("read created database identity: %v", err)
+			return ""
+		}
+		cfg.ExpectedSystemID = id
+		return "new"
+	}
 	if etcdDataEmpty && !pgDataEmpty && cfg.DeadClusterRecovery {
 		authority, safe, reason := confirmRecoveryAuthorityWithPeers(cfg)
 		if safe && authority.IP == cfg.MyIP {

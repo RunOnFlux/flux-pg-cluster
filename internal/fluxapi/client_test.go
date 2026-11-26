@@ -53,3 +53,33 @@ var c t1
 func (t1) ListIPsHelper(base, app string) ([]string, error) {
 	return New(base).ListIPs(context.Background(), app)
 }
+
+func TestInstanceCountRequiresMatchingSuccessfulSpecification(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		ok     bool
+	}{
+		{"valid", 200, `{"status":"success","data":{"name":"myapp","instances":3}}`, true},
+		{"missing", 200, `{"status":"success","data":{"name":"myapp"}}`, false},
+		{"wrong-app", 200, `{"status":"success","data":{"name":"foreign","instances":3}}`, false},
+		{"error-envelope", 200, `{"status":"error","data":{"name":"myapp","instances":3}}`, false},
+		{"unavailable", 503, `{}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/apps/appspecifications/myapp" {
+					t.Error(r.URL.Path)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			count, err := New(srv.URL).InstanceCount(context.Background(), "myapp")
+			if (err == nil) != tc.ok || (tc.ok && count != 3) {
+				t.Fatalf("count=%d error=%v", count, err)
+			}
+		})
+	}
+}

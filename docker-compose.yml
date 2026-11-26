@@ -10,7 +10,7 @@ networks:
 services:
   # Mock Flux API Server
   mock-api:
-    image: nginx:alpine
+    image: nginx:1.31.9-alpine
     container_name: mock-flux-api
     ports:
       - "8080:80"
@@ -48,6 +48,7 @@ services:
     environment:
       - PGDATA=/var/lib/postgresql/data
       - FLUX_API_URL=http://172.20.0.5:80
+      - AUTO_BOOTSTRAP_IF_FRESH=true
       - SSL_ENABLED=true
     depends_on:
       - mock-api
@@ -77,6 +78,7 @@ services:
     environment:
       - PGDATA=/var/lib/postgresql/data
       - FLUX_API_URL=http://172.20.0.5:80
+      - AUTO_BOOTSTRAP_IF_FRESH=true
       - SSL_ENABLED=true
     depends_on:
       - mock-api
@@ -106,6 +108,7 @@ services:
     environment:
       - PGDATA=/var/lib/postgresql/data
       - FLUX_API_URL=http://172.20.0.5:80
+      - AUTO_BOOTSTRAP_IF_FRESH=true
       - SSL_ENABLED=true
     depends_on:
       - mock-api

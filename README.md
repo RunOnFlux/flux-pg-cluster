@@ -1,5 +1,5 @@
 # Flux PostgreSQL Cluster
-![Version](https://img.shields.io/badge/version-1.5.2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.4-blue.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-blue.svg)
 ![Patroni](https://img.shields.io/badge/Patroni-latest-green.svg)
 ![Docker](https://img.shields.io/badge/Docker-required-blue.svg)
@@ -18,10 +18,10 @@ This project creates a self-configuring, highly-available PostgreSQL cluster tha
 |-----|--------|------------|
 | `latest` | `master` | 14 |
 | `dev` | `development` | 14 |
-| `pg15` | `master` | 15 |
+| `latest-pg15` | `master` | 15 |
 | `dev-pg15` | `development` | 15 |
 
-Use `latest` / `dev` for existing PostgreSQL 14 clusters. Use `pg15` / `dev-pg15` only for **new** clusters with fresh volumes — do not swap tags on existing PG 14 data directories.
+Use `latest` / `dev` for existing PostgreSQL 14 clusters. Use `latest-pg15` / `dev-pg15` only for **new** clusters with fresh volumes — do not swap tags on existing PG 14 data directories.
 
 ### pgvector
 
@@ -49,7 +49,7 @@ extension library and is not a safe failover target for databases that use it.
 
 ## Quick Start
 
-New clusters require an explicit offline `flux-agent create-cluster` operation.
+New clusters can use `AUTO_BOOTSTRAP_IF_FRESH=true` for automatic, unanimously confirmed empty-deployment creation, or the explicit offline `flux-agent create-cluster` operation.
 Existing deployments with persistent PGDATA and etcd can upgrade without adding
 environment variables: nodes record their local database identity automatically,
 and empty replacements learn it from a verified healthy initialized cluster.
@@ -124,7 +124,7 @@ Key Points:
       "SSL_ENABLED=true",
       "SSL_PASSPHRASE=your-ssl-passphrase",
       "ALLOW_NEW_CLUSTER_BOOTSTRAP=false",
-      "AUTO_BOOTSTRAP_IF_FRESH=false",
+      "AUTO_BOOTSTRAP_IF_FRESH=true",
       "ALLOW_PG_DATA_WIPE=false"
    ]
    ```
@@ -174,9 +174,9 @@ Key Points:
 | `EXPECTED_POSTGRES_SYSTEM_ID` | Optional explicit database identity constraint. Existing volumes derive their own identity; blank replacements learn and persist it from an authenticated, quorum-backed initialized cluster before cloning. Conflicting or unavailable evidence blocks learning. | empty |
 | `CLUSTER_SEED_IPS` | Optional comma-separated known peer IPs, probed in addition to discovery and persisted membership. | empty |
 | `RETIRED_CLUSTER_IPS` | Operator-confirmed fenced former peers excluded from active discovery/recovery. Never use merely because Flux omitted a node. | empty |
-| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Deprecated compatibility setting; cannot authorize initdb. Use `flux-agent create-cluster`. | `false` |
+| `ALLOW_NEW_CLUSTER_BOOTSTRAP` | Opt in to automatic creation after the full deployment confirms empty data and no identity. Same checks as `AUTO_BOOTSTRAP_IF_FRESH`. | `false` |
 | `ALLOW_ANY_NODE_BOOTSTRAP` | Deprecated compatibility setting; cannot authorize initdb. | `false` |
-| `AUTO_BOOTSTRAP_IF_FRESH` | Deprecated compatibility setting; empty-peer agreement never authorizes initdb. | `false` |
+| `AUTO_BOOTSTRAP_IF_FRESH` | Opt in to new database creation when all declared instances repeatedly authenticate strictly empty PGDATA and fresh etcd state, with no identity pin/history. Also permits a new database after total volume/identity loss; backups are operator-managed. | `false` |
 | `DEAD_CLUSTER_RECOVERY` | Allow rebuilding DCS around pinned, preserved PGDATA after repeated unanimous evidence from all remembered active peers. Unknown/unreachable former peers block recovery until the operator fences and retires them. Does not authorize initdb. | `true` |
 | `ALLOW_PG_DATA_WIPE` | Deprecated compatibility setting; mismatched PGDATA is preserved even when this is true. Operator-verified replacement is manual. | `false` |
 | `ETCD_JOIN_MAX_RETRIES` | Peer-join attempts made by the deterministic candidate before evaluating bootstrap. Non-candidates wait at least 60 attempts and never bootstrap themselves. | `12` |
@@ -209,7 +209,7 @@ Key Points:
 
 ### Split-Brain & Data-Loss Prevention Controls
 
-- **First creation is an explicit offline operator operation.** Normal startup never runs `initdb`, regardless of legacy bootstrap flags.
+- **First creation supports automatic opt-in or an explicit operator operation.** Automatic creation requires every declared placement to be reachable and agree on empty state and membership. It never overwrites data or an identity pin; total volume/identity loss can produce a new empty database when enabled. See [creation and recovery policy](CLUSTER_SAFETY.md).
 - **Remember the original database identity automatically.** Existing PGDATA supplies it; empty replacements require authenticated, quorum-backed agreement before learning it. `EXPECTED_POSTGRES_SYSTEM_ID` is an optional extra constraint, not a rollout prerequisite.
 - **Preserve healthy members.** Discovery omissions never remove a reachable healthy member or self; unreachable removals need quorum and repeated failures.
 - **Preserve PostgreSQL data.** A mismatched identity is quarantined. The proxy rejects unknown/foreign identities and conflicting primaries, clears unverified targets, and closes connections to invalidated targets.
@@ -424,6 +424,9 @@ pip install -r requirements-test.txt
 # All scenarios
 pytest tests/ -v
 
+# Real empty-volume startup and complete volume loss, without a precreated seed
+pytest tests/scenarios/test_automatic_bootstrap.py -v
+
 # Exercise the PostgreSQL 15 variant, including explicit creation and recovery
 pytest tests/ -v --postgres-major=15
 
@@ -440,7 +443,7 @@ pytest tests/scenarios/test_ec2_late_api_registration.py -v
 pytest tests/scenarios/test_ec3_majority_replacement.py -v
 ```
 
-The harness explicitly creates and pins each fresh test cluster. Readiness requires a writable primary and direct live-member probes; cached DCS membership alone is insufficient. Use `pytest tests/unit/ -q` for the harness regression checks. After building the selected PostgreSQL variant from the current runtime source, `--skip-image-build` reuses those images while iterating on tests. The two variants use the same local Compose image names, so run them sequentially and rebuild when switching majors. The package-upgrade and legacy-rollout options select separate baselines: safety-enabled releases require explicit creation, while the legacy fixture intentionally exercises the older auto-bootstrap contract. Both options may be supplied to a full-suite run.
+Recovery scenarios explicitly create and pin each fresh test cluster; the automatic-bootstrap scenarios instead start empty volumes through the normal entrypoint without preinitialization. Readiness requires a writable primary and direct live-member probes; cached DCS membership alone is insufficient. Use `pytest tests/unit/ -q` for the harness regression checks. After building the selected PostgreSQL variant from the current runtime source, `--skip-image-build` reuses those images while iterating on tests. The two variants use the same local Compose image names, so run them sequentially and rebuild when switching majors. The package-upgrade and legacy-rollout options select separate baselines: safety-enabled releases require explicit creation, while the legacy fixture intentionally exercises the older auto-bootstrap contract. Both options may be supplied to a full-suite run.
 
 The image audit also runs `tests/runtime/check_patroni_api_timeouts.py` inside each PostgreSQL image. It occupies all five API workers with silent TLS clients or completed TLS connections that never send HTTP, then verifies that normal API requests recover within bounded time. The Go client tests cover repeated cancelled probes against a silent TLS peer and release of discarded transports.
 

@@ -131,8 +131,8 @@ func FromEnv() *Config {
 		EtcdPeerPort:                envInt("ETCD_PEER_PORT", 2380),
 		AllowNewClusterBootstrap:    envBool("ALLOW_NEW_CLUSTER_BOOTSTRAP", false),
 		AllowAnyNodeBootstrap:       envBool("ALLOW_ANY_NODE_BOOTSTRAP", false),
-		// Legacy bootstrap/wipe flags remain parseable for upgrades but cannot
-		// authorize initdb or deletion. First creation is an explicit command.
+		// Automatic creation is opt-in and requires full-deployment empty-state
+		// agreement. No flag authorizes deletion of existing PostgreSQL data.
 		AutoBootstrapIfFresh:          envBool("AUTO_BOOTSTRAP_IF_FRESH", false),
 		DeadClusterRecovery:           envBool("DEAD_CLUSTER_RECOVERY", true),
 		AllowPGDataWipe:               envBool("ALLOW_PG_DATA_WIPE", false),
