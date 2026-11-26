@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/RunOnFlux/flux-pg-cluster/internal/config"
+	"github.com/RunOnFlux/flux-pg-cluster/internal/fluxapi"
 	pkglog "github.com/RunOnFlux/flux-pg-cluster/internal/log"
 	"github.com/RunOnFlux/flux-pg-cluster/internal/patroni"
 )
@@ -25,10 +27,13 @@ import (
 const clusterIdentityPath = "/cluster-identity"
 
 // nodeIdentity is deliberately small and contains no credentials. The proxy
-// serves it even while Patroni is unavailable, allowing a fresh node to
-// distinguish a genuinely new deployment from an older node whose PGDATA was
-// preserved but whose database cannot currently start.
+// serves it even while Patroni is unavailable, so bootstrap and recovery can
+// distinguish empty placements from preserved data that cannot currently start.
 type nodeIdentity struct {
+	BootstrapProtocol        int               `json:"bootstrap_protocol,omitempty"`
+	BootstrapEtcdEmpty       bool              `json:"bootstrap_etcd_empty,omitempty"`
+	RememberedSystemID       string            `json:"remembered_system_id,omitempty"`
+	PostgresListening        bool              `json:"postgres_listening,omitempty"`
 	AppName                  string            `json:"app_name"`
 	PatroniScope             string            `json:"patroni_scope"`
 	NodeName                 string            `json:"node_name"`
@@ -58,13 +63,25 @@ type recoveryAuthority struct {
 
 func localNodeIdentity(cfg *config.Config) nodeIdentity {
 	identity := nodeIdentity{
-		AppName:        cfg.AppName,
-		PatroniScope:   cfg.PatroniScope,
-		NodeName:       cfg.MyName,
-		PGDataEmpty:    directoryIsEmpty("/var/lib/postgresql/data"),
-		EtcdDataEmpty:  etcdRecoveryDataEmpty("/var/lib/etcd"),
-		MembershipView: membershipNames(cfg.EtcdInitialCluster),
+		BootstrapProtocol:  1,
+		BootstrapEtcdEmpty: etcdDataDirectoryIsFresh("/var/lib/etcd"),
+		AppName:            cfg.AppName,
+		PatroniScope:       cfg.PatroniScope,
+		NodeName:           cfg.MyName,
+		PGDataEmpty:        directoryIsEmpty("/var/lib/postgresql/data"),
+		EtcdDataEmpty:      etcdRecoveryDataEmpty("/var/lib/etcd"),
+		MembershipView:     membershipNames(cfg.EtcdInitialCluster),
 	}
+	if identity.PGDataEmpty {
+		identity.PostgresListening = postgresListening(cfg)
+	}
+	// A legacy empty-state reply did not check remembered replacement identity.
+	// Only the versioned, signed reply can positively authorize new creation.
+	remembered := *cfg
+	if err := restoreReplacementIdentity(&remembered, replacementIdentityFile); err != nil {
+		identity.IdentityError = err.Error()
+	}
+	identity.RememberedSystemID = remembered.ExpectedSystemID
 	if !identity.PGDataEmpty {
 		if control, err := readLocalPGControlData(); err == nil {
 			identity.PostgresSystemIdentifier = control.SystemID
@@ -82,6 +99,20 @@ func localNodeIdentity(cfg *config.Config) nodeIdentity {
 		}
 	}
 	return identity
+}
+
+// A missing data directory must not be treated as an empty deployment while a
+// local server still accepts connections (for example after a live mount loss).
+func postgresListening(cfg *config.Config) bool {
+	if cfg.PostgresPort <= 0 {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", fmt.Sprint(cfg.PostgresPort)), 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // postgresDurableRole reports the role encoded in PGDATA independently of
@@ -278,11 +309,22 @@ func evaluateFreshPeerEvidence(cfg *config.Config, results []peerIdentityResult)
 		return false, fmt.Sprintf("received %d peer results, expected %d", len(results), expectedPeers)
 	}
 	expectedView := membershipNames(cfg.EtcdInitialCluster)
+	seen := make(map[string]bool)
 	for _, result := range results {
+		if seen[result.IP] || !containsString(otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName), result.IP) {
+			return false, "duplicate or unexpected peer evidence"
+		}
+		seen[result.IP] = true
 		if result.Err != nil {
 			return false, fmt.Sprintf("peer %s unreachable or ambiguous: %v", result.IP, result.Err)
 		}
 		identity := result.Identity
+		if identity.BootstrapProtocol != 1 {
+			return false, fmt.Sprintf("peer %s must be upgraded before automatic bootstrap", result.IP)
+		}
+		if !identity.BootstrapEtcdEmpty || identity.RememberedSystemID != "" {
+			return false, fmt.Sprintf("peer %s retains etcd state or a database identity", result.IP)
+		}
 		if identity.IdentityError != "" {
 			return false, identity.IdentityError
 		}
@@ -293,7 +335,7 @@ func evaluateFreshPeerEvidence(cfg *config.Config, results []peerIdentityResult)
 		if identity.NodeName != expectedName {
 			return false, fmt.Sprintf("peer %s identifies as %q, expected %q", result.IP, identity.NodeName, expectedName)
 		}
-		if !identity.PGDataEmpty || identity.PostgresSystemIdentifier != "" {
+		if !identity.PGDataEmpty || identity.PostgresSystemIdentifier != "" || identity.PostgresListening {
 			return false, fmt.Sprintf("peer %s has PostgreSQL data (system_id=%s)", result.IP, identity.PostgresSystemIdentifier)
 		}
 		if !identity.EtcdDataEmpty {
@@ -536,10 +578,7 @@ func equalStrings(a, b []string) bool {
 
 func confirmFreshClusterWithPeers(cfg *config.Config) bool {
 	otherIPs := otherIPsFromInitialCluster(cfg.EtcdInitialCluster, cfg.MyName)
-	if len(otherIPs) == 0 {
-		pkglog.Errorf("FRESH BOOTSTRAP BLOCKED: no peers exist to confirm this is a new deployment")
-		return false
-	}
+	api := fluxapi.New(cfg.FluxAPIURL)
 	cycles := cfg.BootstrapPeerConfirmCycles
 	if cycles < 1 {
 		cycles = 1
@@ -551,7 +590,32 @@ func confirmFreshClusterWithPeers(cfg *config.Config) bool {
 
 	confirmed := 0
 	for confirmed < cycles {
-		ctx, cancel := context.WithTimeout(context.Background(),
+		// Do not infer completeness from the current gossip/location response.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		count, err := api.InstanceCount(ctx, cfg.AppName)
+		var ips []string
+		if err == nil {
+			ips, err = api.ListIPs(ctx, cfg.AppName)
+		}
+		cancel()
+		view := unionIPs(ips)
+		var names []string
+		for _, ip := range view {
+			names = append(names, nodeNameFromIP(ip))
+		}
+		sort.Strings(names)
+		if err != nil || count != len(view) || !containsString(view, cfg.MyIP) ||
+			!equalStrings(names, membershipNames(cfg.EtcdInitialCluster)) {
+			pkglog.Errorf("AUTOMATIC BOOTSTRAP BLOCKED: incomplete or changing deployment (expected=%d discovered=%d error=%v)", count, len(view), err)
+			return false
+		}
+		local := localNodeIdentity(cfg)
+		if !local.PGDataEmpty || local.PostgresListening || !etcdDataDirectoryIsFresh("/var/lib/etcd") ||
+			local.IdentityError != "" || local.RememberedSystemID != "" {
+			pkglog.Errorf("AUTOMATIC BOOTSTRAP BLOCKED: local data or database identity survives")
+			return false
+		}
+		ctx, cancel = context.WithTimeout(context.Background(),
 			time.Duration(cfg.BootstrapPeerProbeTimeout+1)*time.Second)
 		results := probeAllPeerIdentities(ctx, cfg, otherIPs)
 		cancel()

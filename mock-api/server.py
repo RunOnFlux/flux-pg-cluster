@@ -60,6 +60,14 @@ async def app_location(app_name: str) -> dict[str, Any]:
     return {"status": "success", "data": copy.deepcopy(_state["nodes"])}
 
 
+@app.get("/apps/appspecifications/{app_name}")
+async def app_specifications(app_name: str) -> dict[str, Any]:
+    await asyncio.sleep(_state["delay_ms"] / 1000)
+    if _state["error"]:
+        raise HTTPException(status_code=_state["error_status"], detail="mock API error")
+    return {"status": "success", "data": {"name": app_name, "instances": int(os.environ.get("INITIAL_INSTANCE_COUNT", "3"))}}
+
+
 @app.post("/admin/set-nodes")
 async def set_nodes(payload: NodesPayload) -> dict[str, Any]:
     _state["nodes"] = copy.deepcopy(payload.nodes)

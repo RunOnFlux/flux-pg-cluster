@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +17,38 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+}
+
+// InstanceCount reads the declared placement count, rather than inferring it
+// from a location list that may still be incomplete during first deployment.
+func (c *Client) InstanceCount(ctx context.Context, appName string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		c.BaseURL+"/apps/appspecifications/"+url.PathEscape(appName), nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("app specifications status %d", resp.StatusCode)
+	}
+	var result struct {
+		Status string `json:"status"`
+		Data   struct {
+			Name      string `json:"name"`
+			Instances int    `json:"instances"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&result); err != nil {
+		return 0, err
+	}
+	if result.Status != "success" || !strings.EqualFold(result.Data.Name, appName) || result.Data.Instances < 1 {
+		return 0, fmt.Errorf("missing or invalid instance count for %s", appName)
+	}
+	return result.Data.Instances, nil
 }
 
 type appLocationResp struct {

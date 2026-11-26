@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,12 +29,14 @@ func bootstrapTestConfig() *config.Config {
 
 func emptyPeer(cfg *config.Config, name string) nodeIdentity {
 	return nodeIdentity{
-		AppName:        cfg.AppName,
-		PatroniScope:   cfg.PatroniScope,
-		NodeName:       name,
-		PGDataEmpty:    true,
-		EtcdDataEmpty:  true,
-		MembershipView: membershipNames(cfg.EtcdInitialCluster),
+		BootstrapProtocol:  1,
+		BootstrapEtcdEmpty: true,
+		AppName:            cfg.AppName,
+		PatroniScope:       cfg.PatroniScope,
+		NodeName:           name,
+		PGDataEmpty:        true,
+		EtcdDataEmpty:      true,
+		MembershipView:     membershipNames(cfg.EtcdInitialCluster),
 	}
 }
 
@@ -140,6 +143,35 @@ func TestFreshPeerEvidenceBlocksWrongNodeIdentity(t *testing.T) {
 	}
 }
 
+func TestFreshPeerEvidenceRejectsOldProtocolRememberedIdentityAndDuplicates(t *testing.T) {
+	for _, mode := range []string{"old-protocol", "remembered-id", "archived-state", "duplicate", "partial-data", "live-server"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := bootstrapTestConfig()
+			results := []peerIdentityResult{
+				{IP: "10.0.0.2", Identity: emptyPeer(cfg, "node-10-0-0-2")},
+				{IP: "10.0.0.3", Identity: emptyPeer(cfg, "node-10-0-0-3")},
+			}
+			switch mode {
+			case "old-protocol":
+				results[1].Identity.BootstrapProtocol = 0
+			case "remembered-id":
+				results[1].Identity.RememberedSystemID = testSystemID
+			case "archived-state":
+				results[1].Identity.BootstrapEtcdEmpty = false
+			case "duplicate":
+				results[1] = results[0]
+			case "partial-data":
+				results[1].Identity.PGDataEmpty = false
+			case "live-server":
+				results[1].Identity.PostgresListening = true
+			}
+			if ok, reason := evaluateFreshPeerEvidence(cfg, results); ok {
+				t.Fatalf("accepted %s: %s", mode, reason)
+			}
+		})
+	}
+}
+
 func TestDirectoryIsEmptyIsStrict(t *testing.T) {
 	dir := t.TempDir()
 	if !directoryIsEmpty(dir) {
@@ -150,6 +182,23 @@ func TestDirectoryIsEmptyIsStrict(t *testing.T) {
 	}
 	if directoryIsEmpty(dir) {
 		t.Fatal("any leftover file must count as preserved state")
+	}
+}
+
+func TestEmptyStateCannotIgnoreAnActiveDatabaseListener(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	cfg := bootstrapTestConfig()
+	cfg.PostgresPort = listener.Addr().(*net.TCPAddr).Port
+	if !postgresListening(cfg) {
+		t.Fatal("active listener was treated as an absent database")
+	}
+	_ = listener.Close()
+	if postgresListening(cfg) {
+		t.Fatal("closed listener was treated as active")
 	}
 }
 
